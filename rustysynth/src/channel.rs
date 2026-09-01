@@ -127,6 +127,12 @@ impl Channel {
         self.poly_pressure = [0; 128];
     }
 
+    // MIDI data bytes are seven bits by definition, but a malformed file can
+    // still deliver a larger one - the corpus has files where a byte lands in
+    // CC11 as 255. Left unmasked that made `expression` 1.99 rather than at
+    // most 1, and the old `(volume * expression)^2` channel gain turned it into
+    // a 2.4x boost that clipped. Masking here keeps every controller inside
+    // the range its getters promise.
     pub(crate) fn set_bank(&mut self, value: i32) {
         self.bank_number = value;
 
@@ -140,35 +146,35 @@ impl Channel {
     }
 
     pub(crate) fn set_modulation_coarse(&mut self, value: i32) {
-        self.modulation = (self.modulation & 0x7F) | (value << 7) as i16;
+        self.modulation = (self.modulation & 0x7F) | ((value & 0x7F) << 7) as i16;
     }
 
     pub(crate) fn set_modulation_fine(&mut self, value: i32) {
-        self.modulation = (((self.modulation as i32) & 0xFF80) | value) as i16;
+        self.modulation = (((self.modulation as i32) & 0xFF80) | (value & 0x7F)) as i16;
     }
 
     pub(crate) fn set_volume_coarse(&mut self, value: i32) {
-        self.volume = (self.volume & 0x7F) | (value << 7) as i16;
+        self.volume = (self.volume & 0x7F) | ((value & 0x7F) << 7) as i16;
     }
 
     pub(crate) fn set_volume_fine(&mut self, value: i32) {
-        self.volume = (((self.volume as i32) & 0xFF80) | value) as i16;
+        self.volume = (((self.volume as i32) & 0xFF80) | (value & 0x7F)) as i16;
     }
 
     pub(crate) fn set_pan_coarse(&mut self, value: i32) {
-        self.pan = (self.pan & 0x7F) | (value << 7) as i16;
+        self.pan = (self.pan & 0x7F) | ((value & 0x7F) << 7) as i16;
     }
 
     pub(crate) fn set_pan_fine(&mut self, value: i32) {
-        self.pan = (((self.pan as i32) & 0xFF80) | value) as i16;
+        self.pan = (((self.pan as i32) & 0xFF80) | (value & 0x7F)) as i16;
     }
 
     pub(crate) fn set_expression_coarse(&mut self, value: i32) {
-        self.expression = (self.expression & 0x7F) | (value << 7) as i16;
+        self.expression = (self.expression & 0x7F) | ((value & 0x7F) << 7) as i16;
     }
 
     pub(crate) fn set_expression_fine(&mut self, value: i32) {
-        self.expression = (((self.expression as i32) & 0xFF80) | value) as i16;
+        self.expression = (((self.expression as i32) & 0xFF80) | (value & 0x7F)) as i16;
     }
 
     pub(crate) fn set_hold_pedal(&mut self, value: i32) {
@@ -176,11 +182,11 @@ impl Channel {
     }
 
     pub(crate) fn set_reverb_send(&mut self, value: i32) {
-        self.cc[Channel::CC_REVERB_SEND] = value as u8;
+        self.cc[Channel::CC_REVERB_SEND] = (value & 0x7F) as u8;
     }
 
     pub(crate) fn set_chorus_send(&mut self, value: i32) {
-        self.cc[Channel::CC_CHORUS_SEND] = value as u8;
+        self.cc[Channel::CC_CHORUS_SEND] = (value & 0x7F) as u8;
     }
 
     /// Records a controller this synthesizer has no dedicated field for, so
@@ -424,5 +430,36 @@ mod tests {
 
         channel.set_pitch_bend(0x7F, 0x7F);
         assert!((channel.get_pitch_bend_normalized() - 1_f32).abs() < 1.0e-3);
+    }
+    /// A malformed MIDI file can deliver a data byte with the high bit set.
+    /// The corpus has files that land 255 in CC11, and unmasked that made
+    /// `expression` 1.99 rather than at most 1 - which the old squared channel
+    /// gain turned into a 2.4x boost that clipped.
+    #[test]
+    fn out_of_range_controller_values_cannot_exceed_full_scale() {
+        let mut channel = Channel::new(false);
+
+        channel.set_expression_coarse(255);
+        assert!(channel.get_expression() <= 1_f32);
+        assert!((channel.get_expression() - (127 << 7) as f32 / 16383_f32).abs() < 1.0e-6);
+
+        channel.set_volume_coarse(255);
+        assert!(channel.get_volume() <= 1_f32);
+
+        channel.set_modulation_coarse(255);
+        assert!(channel.get_modulation() <= 50_f32);
+
+        channel.set_pan_coarse(255);
+        assert!(channel.get_pan() <= 50_f32);
+
+        channel.set_expression_fine(255);
+        channel.set_volume_fine(255);
+        assert!(channel.get_expression() <= 1_f32);
+        assert!(channel.get_volume() <= 1_f32);
+
+        channel.set_reverb_send(255);
+        channel.set_chorus_send(255);
+        assert!(channel.get_reverb_send() <= 1_f32);
+        assert!(channel.get_chorus_send() <= 1_f32);
     }
 }
