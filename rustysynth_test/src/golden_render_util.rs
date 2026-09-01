@@ -14,6 +14,11 @@ pub type Event = (usize, i32, i32, i32, i32);
 pub const SAMPLE_RATE: i32 = 44100;
 pub const BLOCK: usize = 64;
 
+/// Only every Nth frame is kept in the reference waveform. A gain, filter or
+/// pan error shifts every sample, so decimating costs almost no sensitivity
+/// and keeps the checked-in fixture under 100 KB.
+pub const DECIMATION: usize = 16;
+
 /// FNV-1a over the raw bit patterns of the rendered samples.
 ///
 /// Hashing the bits rather than the values makes the comparison exact: a
@@ -52,6 +57,8 @@ pub struct RenderResult {
     pub rms: f32,
     pub non_finite: usize,
     pub nonzero_blocks: usize,
+    /// Decimated stereo waveform, left and right interleaved.
+    pub samples: Vec<f32>,
 }
 
 pub fn open_timgm6mb() -> Arc<SoundFont> {
@@ -77,6 +84,9 @@ pub fn render_script(sound_font: &Arc<SoundFont>, events: &[Event], steps: usize
     let mut non_finite = 0_usize;
     let mut nonzero_blocks = 0_usize;
 
+    let mut samples: Vec<f32> = Vec::with_capacity(2 * steps * BLOCK / DECIMATION + 2);
+    let mut frame = 0_usize;
+
     let mut next = 0_usize;
 
     for step in 0..steps {
@@ -90,6 +100,12 @@ pub fn render_script(sound_font: &Arc<SoundFont>, events: &[Event], steps: usize
 
         let mut block_energy = 0_f32;
         for i in 0..BLOCK {
+            if frame.is_multiple_of(DECIMATION) {
+                samples.push(left[i]);
+                samples.push(right[i]);
+            }
+            frame += 1;
+
             for value in [left[i], right[i]] {
                 hash.write_f32(value);
 
@@ -114,6 +130,7 @@ pub fn render_script(sound_font: &Arc<SoundFont>, events: &[Event], steps: usize
         rms: (sum_squares / (2 * BLOCK * steps) as f64).sqrt() as f32,
         non_finite,
         nonzero_blocks,
+        samples,
     }
 }
 
