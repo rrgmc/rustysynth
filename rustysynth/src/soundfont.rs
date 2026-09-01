@@ -128,6 +128,10 @@ impl SoundFont {
 mod tests {
     use super::*;
 
+    use crate::default_modulators::DEFAULT_MODULATORS;
+    use crate::generator_type::GeneratorType;
+    use crate::modulator::Modulator;
+    use crate::modulator_source::ModulatorSource;
     use std::{fs::File, path::PathBuf};
 
     fn samples_dir_path() -> PathBuf {
@@ -156,5 +160,77 @@ mod tests {
             SoundFont::new(&mut file),
             Err(SoundFontError::SampleDataNotFound)
         ));
+    }
+    /// Loads a fixture built to carry modulators, so the whole load path -
+    /// chunk reading, zone slicing, the merge rule and the rejection rules -
+    /// is covered without needing a SoundFont too large to commit.
+    #[test]
+    fn test_load_modulators() {
+        let path = samples_dir_path().join("test_modulators.sf2");
+        let mut file = File::open(&path).unwrap();
+        let sound_font = SoundFont::new(&mut file).unwrap();
+
+        let instrument_region = &sound_font.get_instruments()[0].get_regions()[0];
+
+        // The fixture carries three instrument modulators. The third names a
+        // linked source, which this build does not support, so it is dropped
+        // at load time rather than reaching the audio thread.
+        let modulators = instrument_region.get_modulators();
+        assert_eq!(modulators.len(), 2);
+
+        let velocity = &modulators[0];
+        assert_eq!(
+            velocity.get_destination(),
+            GeneratorType::INITIAL_ATTENUATION
+        );
+        assert_eq!(velocity.get_amount(), 800);
+        assert_eq!(
+            velocity.get_source().get_index(),
+            ModulatorSource::NOTE_ON_VELOCITY
+        );
+        assert!(!velocity.get_source().is_midi_controller());
+        assert!(velocity.get_source().is_negative_direction());
+        assert_eq!(
+            velocity.get_source().get_curve_type(),
+            ModulatorSource::CURVE_CONCAVE
+        );
+
+        let brightness = &modulators[1];
+        assert_eq!(
+            brightness.get_destination(),
+            GeneratorType::INITIAL_FILTER_CUTOFF_FREQUENCY
+        );
+        assert_eq!(brightness.get_amount(), 2400);
+        assert!(brightness.get_source().is_midi_controller());
+        assert_eq!(brightness.get_source().get_index(), 74);
+
+        // The resolved list is the defaults with the font merged over them.
+        // The velocity modulator is an identity match for default 1, so it
+        // replaces it at 800 cB rather than stacking to 1760; the CC74 one has
+        // no counterpart and is appended.
+        let resolved = &instrument_region.resolved_modulators;
+        assert_eq!(resolved.len(), DEFAULT_MODULATORS.len() + 1);
+
+        let attenuation_from_velocity: Vec<&Modulator> = resolved
+            .iter()
+            .filter(|m| {
+                m.get_destination() == GeneratorType::INITIAL_ATTENUATION
+                    && !m.get_source().is_midi_controller()
+            })
+            .collect();
+        assert_eq!(attenuation_from_velocity.len(), 1);
+        assert_eq!(attenuation_from_velocity[0].get_amount(), 800);
+
+        // Preset modulators stay on the preset region, and get no defaults of
+        // their own - those belong to the instrument layer, and merging them
+        // here as well would apply every default twice.
+        let preset_region = &sound_font.get_presets()[0].get_regions()[0];
+        let preset_modulators = preset_region.get_modulators();
+        assert_eq!(preset_modulators.len(), 1);
+        assert_eq!(
+            preset_modulators[0].get_destination(),
+            GeneratorType::REVERB_EFFECTS_SEND
+        );
+        assert_eq!(preset_modulators[0].get_amount(), 350);
     }
 }
