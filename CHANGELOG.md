@@ -28,17 +28,38 @@ Deliberate deviations from SF2 2.04, all of them chosen so that existing output 
 - **Linked modulators, non-identity transforms, and modulators targeting sample addressing, ranges
   or overrides are dropped at load time**, per section 8.2.1, rather than being honored partially.
 
-Two audible changes, both measured over a 4,973 file MIDI corpus rendered through TimGM6mb:
+Three audible changes, all measured over a 4,973 file MIDI corpus rendered through TimGM6mb with
+its modulator chunks emptied, so that only the SF2 defaults were in play. 4,155 of the 4,908
+renderable files (**84.7%**) render at an unchanged level; the rest divide as follows.
 
 - `modLfoToVolume` was tested with `> 0.05` rather than `.abs() > 0.05`, so a **negative**
-  modulation-LFO-to-volume was silently ignored. It is now honored. 51 of 299 sampled files changed,
-  the largest by 0.85% peak.
-- Channel pressure now reaches vibrato depth, as above. 5 further files changed, one by 12%.
+  modulation-LFO-to-volume was silently ignored. It is now honored. This is much the largest group:
+  699 files (14.2%), worst 5.8% peak change, median 0.11%.
+- Channel pressure now reaches vibrato depth through SF2 default modulator 3, having previously had
+  no effect whatsoever.
+- Controller data bytes are masked to seven bits. A malformed file can deliver a larger one - the
+  corpus has files that land 255 in CC11 - and unmasked that made `expression` 1.99 rather than at
+  most 1, which the old `(volume * expression)^2` channel gain turned into a 2.4x boost that
+  clipped. Together with channel pressure this accounts for 54 files (1.1%), median 1.0%, worst
+  65.8% - and where it is large it is because the file was previously being played far too loud.
 
-Everything else reproduces the previous output. Rendering the corpus sample through fonts whose
-modulator chunks had been emptied - leaving only the SF2 defaults - produced no file differing
-beyond f32 rounding, which is what establishes that the default modulator table is calibrated to the
-hardcoded controller handling it replaced.
+The same corpus rendered through a stripped GeneralUser GS moves 119 files (2.4%).
+
+That 84.7% are unchanged, and that every file which did move is attributable to one of three named
+causes, is what establishes that the default modulator table reproduces the hardcoded controller
+handling it replaced rather than merely resembling it. The comparison is by level rather than
+bit-for-bit on purpose: the same curve expressed as `10^(0.05 * -0.1 * 960 * concave(v))` instead of
+`v^2` agrees to 1e-14 in f64 but not in the last bits of f32, and codegen alone already moves those
+- the same source renders differently under `--release` than under `cargo test`.
+
+For the other half of the question, that honoring a font's own modulators actually does something:
+99.7% of the corpus sample renders differently through GeneralUser GS with its modulators honored
+than with them stripped, and on its grand piano the measured brightness of a note climbs
+monotonically from velocity 16 to 127 by a factor of 2.08, against 1.11 and non-monotonic with the
+modulators removed. That is the 906 velocity-to-filter-cutoff modulators the font ships.
+
+Rendering costs about **7.6% more** than before (41.9s against 45.1s for 150 corpus files, three
+alternating runs, spread under 0.3%).
 
 Fixed along the way:
 
@@ -46,7 +67,13 @@ Fixed along the way:
   -1.58 dB. Generators alone cannot reach it, but modulators can, and FluidR3_GM ships forty at
   amount -470. The NaN would have propagated into the reverb and chorus comb filters, which are IIR
   with persistent state, and the output would never have recovered. Resonance is now clamped to the
-  SF2 generator range.
+  SF2 generator range, as are attenuation, pan, the tremolo depth and the pitch depths - the last
+  two because `modLfoToVolume` is an exponent that overflows to infinity well inside the range a
+  modulator can express.
+
+Rendering the corpus sample through all six test fonts - 29,448 files in total, including the
+FluidR3_GM case above - produced no NaN or infinity anywhere in the output, and no increase in the
+number of files that fail to parse.
 
 # v1.3.6
 
