@@ -3,9 +3,9 @@
 One preset -> one instrument -> one sample, with modulators in both `pmod` and
 `imod`, so the whole load path can be tested with no external font.
 
-Every chunk is built to an even length on purpose. RIFF allows an odd chunk
-followed by a pad byte, but this crate's reader does not skip one, so a fixture
-that relied on padding would not load.
+Every chunk is built to an even length on purpose, so that this fixture tests
+the modulator path and nothing else. Odd chunks and their RIFF pad byte are
+`samples/make_test_malformed.py`'s business.
 """
 import struct
 import io

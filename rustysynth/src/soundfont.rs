@@ -320,4 +320,132 @@ mod tests {
         );
         assert_eq!(preset_modulators[0].get_amount(), 350);
     }
+
+    /// Every fixture below is built by `samples/make_test_malformed.py`, one
+    /// defect apiece.
+    fn load_fixture(name: &str) -> Result<SoundFont, SoundFontError> {
+        let path = samples_dir_path().join(name);
+        let mut file = File::open(&path).unwrap();
+        SoundFont::new(&mut file)
+    }
+
+    /// The Crisis General Midi case: one bad sample header out of thousands
+    /// used to cost the whole file.
+    #[test]
+    fn test_load_drops_only_the_unplayable_region() {
+        let sound_font = load_fixture("test_bad_region.sf2").unwrap();
+
+        let regions = sound_font.get_instruments()[0].get_regions();
+        assert_eq!(regions.len(), 1);
+        // The survivor is the one on the good sample, not the one that was
+        // simply first.
+        assert_eq!(regions[0].get_sample_end_loop(), 92);
+
+        assert_eq!(sound_font.get_warning_count(), 1);
+        assert_eq!(
+            sound_font.get_warnings(),
+            [SoundFontWarning::RegionOutOfRange {
+                instrument_id: 0,
+                region_index: 1,
+                defect: RegionDefect::LoopEndPastWaveData,
+            }]
+        );
+    }
+
+    /// The Timbres of Heaven case. The empty instrument has to keep its
+    /// position, because preset regions address instruments by index and
+    /// removing it would repoint every later preset at the wrong one.
+    #[test]
+    fn test_load_keeps_an_instrument_that_has_no_zone() {
+        let sound_font = load_fixture("test_empty_instrument.sf2").unwrap();
+
+        let instruments = sound_font.get_instruments();
+        assert_eq!(instruments.len(), 3);
+        assert_eq!(instruments[0].get_regions().len(), 1);
+        assert!(instruments[1].get_regions().is_empty());
+        assert_eq!(instruments[2].get_regions().len(), 1);
+
+        // Instrument 2 still holds the sample it was given, so nothing shifted
+        // underneath it.
+        assert_eq!(instruments[2].get_regions()[0].get_sample_start(), 128);
+
+        let preset_regions = sound_font.get_presets()[0].get_regions();
+        assert_eq!(preset_regions.len(), 2);
+        assert_eq!(preset_regions[0].get_instrument_id(), 0);
+        assert_eq!(preset_regions[1].get_instrument_id(), 2);
+
+        assert_eq!(
+            sound_font.get_warnings(),
+            [SoundFontWarning::InstrumentWithoutZone(1)]
+        );
+    }
+
+    /// A zone with no `sampleID` used to bind silently to sample 0.
+    #[test]
+    fn test_load_drops_a_zone_that_names_no_sample() {
+        let sound_font = load_fixture("test_zone_without_sample.sf2").unwrap();
+
+        // Zone 0 is the global zone, zone 1 the only real region, and zone 2
+        // the one that names nothing.
+        assert_eq!(sound_font.get_instruments()[0].get_regions().len(), 1);
+        assert_eq!(
+            sound_font.get_warnings(),
+            [SoundFontWarning::ZoneWithoutSampleId {
+                instrument_id: 0,
+                zone_index: 2,
+            }]
+        );
+    }
+
+    /// Leniency stops short of handing back a font that can only render
+    /// silence.
+    #[test]
+    fn test_load_reject_when_no_region_survives() {
+        assert!(matches!(
+            load_fixture("test_no_usable_region.sf2"),
+            Err(SoundFontError::SanityCheckFailed)
+        ));
+    }
+
+    /// An unrecognized four-CC in any list used to be fatal.
+    #[test]
+    fn test_load_skips_unknown_chunks() {
+        let sound_font = load_fixture("test_unknown_chunk.sf2").unwrap();
+
+        assert_eq!(sound_font.get_instruments()[0].get_regions().len(), 1);
+        assert_eq!(sound_font.get_warning_count(), 2);
+
+        let lists: Vec<String> = sound_font
+            .get_warnings()
+            .iter()
+            .map(|warning| match warning {
+                SoundFontWarning::UnknownChunk { list, .. } => list.to_string(),
+                other => panic!("unexpected warning: {other:?}"),
+            })
+            .collect();
+        assert_eq!(lists, ["INFO", "pdta"]);
+    }
+
+    /// RIFF pads an odd-sized chunk, and nothing used to consume that byte, so
+    /// everything after it read misaligned.
+    #[test]
+    fn test_load_odd_sized_chunk() {
+        let sound_font = load_fixture("test_odd_chunk.sf2").unwrap();
+
+        assert_eq!(sound_font.get_info().get_comments(), "odd");
+        assert_eq!(sound_font.get_instruments()[0].get_regions().len(), 1);
+        assert_eq!(sound_font.get_warning_count(), 0);
+    }
+
+    /// A well-formed font must not acquire warnings just because they now
+    /// exist.
+    #[test]
+    fn test_load_a_good_font_warns_about_nothing() {
+        let path = samples_dir_path().join("test_modulators.sf2");
+        let mut file = File::open(&path).unwrap();
+        let sound_font = SoundFont::new(&mut file).unwrap();
+
+        assert!(sound_font.get_warnings().is_empty());
+        assert_eq!(sound_font.get_warning_count(), 0);
+    }
 }
