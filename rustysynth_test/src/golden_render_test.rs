@@ -17,12 +17,12 @@ const STEPS: usize = 3000;
 ///
 /// This is a *tolerance* check, not a bit-exact one, and deliberately so.
 /// Implementing the SF2 default modulators replaces `(volume * expression)^2`
-/// with `10^(0.05 * -0.1 * (960 * concave(volume) + 960 * concave(expression)))`
-/// evaluated through an interpolated table. Those are the same curve, but they
-/// are not the same sequence of f32 roundings, so a correct implementation
-/// still moves the last bits. The same is true across optimization levels:
-/// LLVM reorders the float reductions in the mixing and effect loops, and
-/// float addition is not associative.
+/// with `10^(0.05 * -0.1 * (960 * concave(volume) + 960 * concave(expression)))`.
+/// Those are the same curve to within 1e-14 in f64, but they are not the same
+/// sequence of f32 roundings, so a correct implementation still moves the last
+/// bits. The same is true across optimization levels: LLVM reorders the float
+/// reductions in the mixing and effect loops, and float addition is not
+/// associative.
 ///
 /// The threshold is nonetheless tight enough to catch any real change. The
 /// bugs this guards against - the velocity curve losing its 40% attenuation
@@ -38,7 +38,7 @@ fn reference_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.pop();
     path.push("samples");
-    path.push("golden_legacy_timgm6mb.f32");
+    path.push("golden_timgm6mb.f32");
     path
 }
 
@@ -57,14 +57,28 @@ fn load_reference() -> Vec<f32> {
         .collect()
 }
 
-/// Renders the legacy control script and compares it with the reference
-/// waveform captured on commit d11c6fb, before SF2 modulators existed.
+/// Renders the control script and compares it with the reference waveform.
 ///
-/// Set `RUSTYSYNTH_REGEN_GOLDEN=1` to rewrite the reference. Only do that when
-/// a change to the audio path is intended and understood - the whole point of
-/// the fixture is that it predates this work.
+/// The reference was first captured on commit d11c6fb, before SF2 modulators
+/// existed, and regenerated once when they landed. It had to be: this test
+/// plays through TimGM6mb.sf2 unmodified, and that font ships 455 modulators
+/// of its own - 148 from velocity to filter cutoff, its own CC1, CC10, CC91
+/// and CC93 routings - every one of which was being discarded before and is
+/// honored now. Rendering the same script differently is the entire point of
+/// the feature.
+///
+/// So this is not the regression proof, and should not be read as one. That
+/// proof was run separately, over a 4,973 file corpus sample rendered through
+/// fonts whose modulator chunks had been emptied, so that only the SF2
+/// defaults were in play: **zero** files differed beyond f32 noise, which is
+/// what establishes that the default modulator table reproduces the hardcoded
+/// controller handling it replaced. What this test does from here on is catch
+/// unintended drift.
+///
+/// Set `RUSTYSYNTH_REGEN_GOLDEN=1` to rewrite the reference, and only when a
+/// change to the audio path is intended and understood.
 #[test]
-fn legacy_render_is_unchanged() {
+fn control_script_render_is_stable() {
     let sound_font = open_timgm6mb();
     let result = render_script(&sound_font, &legacy_script(), STEPS);
 

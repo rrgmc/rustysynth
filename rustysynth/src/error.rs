@@ -11,6 +11,7 @@ pub enum SynthesizerError {
     SampleRateOutOfRange(i32),
     BlockSizeOutOfRange(usize),
     MaximumPolyphonyOutOfRange(usize),
+    SendScaleOutOfRange(f32),
 }
 
 impl error::Error for SynthesizerError {}
@@ -32,6 +33,13 @@ impl fmt::Display for SynthesizerError {
                 write!(
                     f,
                     "the maximum number of polyphony must be between 8 and 256, but was {}",
+                    value
+                )
+            }
+            SynthesizerError::SendScaleOutOfRange(value) => {
+                write!(
+                    f,
+                    "the send scale must be between 0 and 10, but was {}",
                     value
                 )
             }

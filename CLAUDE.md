@@ -11,12 +11,13 @@ one without asking.
 
 ## Workspace layout
 
-Cargo workspace with three members:
+Cargo workspace with four members:
 
 | Crate | Role |
 | --- | --- |
-| `rustysynth/` | The published library (v1.3.6, edition 2021). All real code lives here. |
+| `rustysynth/` | The published library (v1.4.0, edition 2021). All real code lives here. |
 | `rustysynth_test/` | SoundFont-parser regression tests. Note it is a **lib crate** with `#[test]`s in `src/*_test.rs`, not a `tests/` directory. |
+| `rustysynth_regress/` | Unpublished verification harness. Renders a MIDI corpus against SoundFonts too large to commit and reduces each file to one line, so two builds can be compared. Also strips a font's modulator chunks, which is how the "does this still sound the same?" control font is made — none of the available fonts ships without modulators. |
 | `example/` | Binary demo that renders `.pcm` files. |
 
 ## Commands
@@ -54,8 +55,19 @@ new tests there, with a fixture in `samples/`, over adding to `rustysynth_test`.
 panics were fixed by tightening it. SoundFont3 is explicitly rejected with
 `SoundFontError::UnsupportedSampleFormat`.
 
-**SF2 modulators are not implemented.** The `pmod` and `imod` chunks are read and thrown away
-(`soundfont_parameters.rs:58,62`); only generators drive synthesis.
+**SF2 modulators are implemented** (`modulator.rs`, `modulator_source.rs`,
+`default_modulators.rs`). `pmod` and `imod` are parsed into `Zone`, then merged onto regions by the
+SF2 9.5.4 rule - a modulator identical in source, destination and amount source *replaces* the one
+already there rather than adding to it, which is how a font overrides a default. Instrument regions
+carry two lists: `modulators` (what the font says, exposed by `get_modulators()`) and
+`resolved_modulators` (that merged over the defaults, used at note-on).
+
+Deviations from the spec are deliberate and listed in `CHANGELOG.md` under v1.4.0: default
+modulator 2 is omitted, default 10 (pitch bend) is handled natively in `voice.rs` rather than
+through the engine, and the send defaults use amount 1000 rather than 200. Linked modulators and
+non-identity transforms are dropped at load time - the latter because preset and instrument amounts
+are *summed* at voice start, which is only equivalent to evaluating them separately while the
+transform is linear.
 
 ### Region resolution (preset + instrument → voice parameters)
 
@@ -90,9 +102,23 @@ voice's `previous_*` and `current_*` mix gains, which is why `Voice` carries gai
 exclusive class (drum choke) → take a free slot → steal the lowest `priority()`, which is
 envelope-stage ranked so releasing voices are stolen before attacking ones.
 
-The per-voice chain in `Voice::process` (`voice.rs:191`) is **oscillator → biquad low-pass →
-gain/pan**. Critically, the envelopes and LFOs advance **once per block (control rate), not per
-sample** — anything you add that modulates per-sample breaks that model.
+The per-voice chain in `Voice::process` is **oscillator → biquad low-pass → gain/pan**. Critically,
+the envelopes, LFOs *and modulators* advance **once per block (control rate), not per sample** —
+anything you add that modulates per-sample breaks that model. No modulator source is per-sample
+either: every one is per-voice-static (velocity, key) or per-channel (CC, pressure, pitch wheel).
+
+Every synthesis parameter is the sum of three arrays indexed by generator number: `gen_cb` (preset
+plus instrument generators), `static_cb` (modulators whose sources cannot change) and `dyn_cb`
+(re-evaluated each block). They are kept apart because the legacy Polyphone-derived scale factors —
+`0.4 ×` generator attenuation, `0.5 ×` filter Q — apply to the generator *only*; scaling the
+velocity curve by 0.4 as well would flatten every SoundFont's dynamics by 60%.
+
+Two traps live here. Dynamic attenuation goes to `mix_gain`, never `note_gain`: `note_gain` below
+`NON_AUDIBLE` retires the voice permanently, so folding CC7/CC11 in would destroy every voice on a
+channel whenever an expression pedal swept to zero. And resonance must stay clamped to `[0, 960]`
+cB — `bi_quad_filter.rs:58` divides by `1 + 6·(resonance − 1)`, zero at about −1.58 dB, and the
+resulting NaN poisons the IIR reverb and chorus state permanently. FluidR3_GM really does ship
+modulators that reach it.
 
 ### Channels
 

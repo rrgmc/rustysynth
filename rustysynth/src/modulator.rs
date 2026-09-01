@@ -30,6 +30,25 @@ impl Modulator {
     /// The size of one `SFModList` record.
     const RECORD_SIZE: usize = 10;
 
+    /// A modulator that contributes nothing, used to fill the fixed-size array
+    /// a voice keeps its dynamic modulators in.
+    pub(crate) const fn inactive() -> Self {
+        let none = ModulatorSource::general(
+            ModulatorSource::NO_CONTROLLER,
+            ModulatorSource::CURVE_LINEAR,
+            false,
+            false,
+        );
+
+        Self {
+            source: none,
+            destination: GeneratorType::UNUSED_END,
+            amount: 0,
+            amount_source: none,
+            transform: 0,
+        }
+    }
+
     fn new<R: Read>(reader: &mut R) -> Result<Self, SoundFontError> {
         let source = ModulatorSource::from_bits(BinaryReader::read_u16(reader)?);
         let destination = BinaryReader::read_u16(reader)?;

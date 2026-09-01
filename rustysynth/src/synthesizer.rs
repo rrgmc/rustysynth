@@ -136,6 +136,16 @@ impl Synthesizer {
             return;
         }
 
+        // Record every controller before anything else looks at the channel.
+        // A SoundFont modulator may name a controller this synthesizer has no
+        // dedicated field for, and the ones it does have are still handled
+        // below. This has to be its own statement: three of the controller
+        // cases dispatch to &mut self methods, so it cannot share a borrow
+        // with the binding underneath.
+        if command == 0xB0 {
+            self.channels[channel as usize].set_cc(data1, data2);
+        }
+
         let channel_info = &mut self.channels[channel as usize];
 
         match command {
@@ -166,8 +176,10 @@ impl Synthesizer {
                 0x7B => self.note_off_all_channel(channel, false), // All Note Off
                 _ => (),
             },
-            0xC0 => channel_info.set_patch(data1), // Program Change
-            0xE0 => channel_info.set_pitch_bend(data1, data2), // Pitch Bend
+            0xA0 => channel_info.set_poly_pressure(data1, data2), // Polyphonic Key Pressure
+            0xC0 => channel_info.set_patch(data1),                // Program Change
+            0xD0 => channel_info.set_channel_pressure(data1),     // Channel Pressure
+            0xE0 => channel_info.set_pitch_bend(data1, data2),    // Pitch Bend
             _ => (),
         }
     }
@@ -240,7 +252,7 @@ impl Synthesizer {
                         let region_pair = RegionPair::new(preset_region, instrument_region);
 
                         if let Some(value) = self.voices.request_new(instrument_region, channel) {
-                            value.start(&region_pair, channel, key, velocity)
+                            value.start(&region_pair, channel_info, channel, key, velocity)
                         }
                     }
                 }

@@ -14,12 +14,24 @@ pub struct SynthesizerSettings {
     pub maximum_polyphony: usize,
     /// The value indicating whether reverb and chorus are enabled.
     pub enable_reverb_and_chorus: bool,
+    /// Scales how much every voice sends to the reverb.
+    ///
+    /// A SoundFont that ships its own CC91 modulators overrides the default
+    /// one entirely, and some cap the send well below full scale - GeneralUser
+    /// GS stops at 35%. This exists so that a drier mix than intended can be
+    /// brought back up without editing the font. 1.0 honors the font.
+    pub reverb_send_scale: f32,
+    /// Scales how much every voice sends to the chorus. See
+    /// `reverb_send_scale`.
+    pub chorus_send_scale: f32,
 }
 
 impl SynthesizerSettings {
     const DEFAULT_BLOCK_SIZE: usize = 64;
     const DEFAULT_MAXIMUM_POLYPHONY: usize = 64;
     const DEFAULT_ENABLE_REVERB_AND_CHORUS: bool = true;
+    const DEFAULT_SEND_SCALE: f32 = 1_f32;
+    const MAXIMUM_SEND_SCALE: f32 = 10_f32;
 
     /// Initializes a new instance of synthesizer settings.
     ///
@@ -32,6 +44,8 @@ impl SynthesizerSettings {
             block_size: SynthesizerSettings::DEFAULT_BLOCK_SIZE,
             maximum_polyphony: SynthesizerSettings::DEFAULT_MAXIMUM_POLYPHONY,
             enable_reverb_and_chorus: SynthesizerSettings::DEFAULT_ENABLE_REVERB_AND_CHORUS,
+            reverb_send_scale: SynthesizerSettings::DEFAULT_SEND_SCALE,
+            chorus_send_scale: SynthesizerSettings::DEFAULT_SEND_SCALE,
         }
     }
 
@@ -39,6 +53,18 @@ impl SynthesizerSettings {
         SynthesizerSettings::check_sample_rate(self.sample_rate)?;
         SynthesizerSettings::check_block_size(self.block_size)?;
         SynthesizerSettings::check_maximum_polyphony(self.maximum_polyphony)?;
+        SynthesizerSettings::check_send_scale(self.reverb_send_scale)?;
+        SynthesizerSettings::check_send_scale(self.chorus_send_scale)?;
+
+        Ok(())
+    }
+
+    fn check_send_scale(value: f32) -> Result<(), SynthesizerError> {
+        // Rejecting NaN matters: it would reach the effect buses, which are
+        // IIR with persistent state, and never wash out.
+        if !(0_f32..=SynthesizerSettings::MAXIMUM_SEND_SCALE).contains(&value) {
+            return Err(SynthesizerError::SendScaleOutOfRange(value));
+        }
 
         Ok(())
     }
