@@ -21,8 +21,13 @@ pub(crate) struct Channel {
     expression: i16,
     hold_pedal: bool,
 
-    reverb_send: u8,
-    chorus_send: u8,
+    /// Raw 7-bit value of every controller, so that modulators can name one
+    /// this synthesizer has no dedicated field for. CC1, CC7, CC10 and CC11
+    /// are also tracked at 14 bits above and are read from there instead;
+    /// their entries here are kept consistent but unused.
+    cc: [u8; 128],
+    channel_pressure: u8,
+    poly_pressure: [u8; 128],
 
     rpn: i16,
     pitch_bend_range: i16,
@@ -35,6 +40,14 @@ pub(crate) struct Channel {
 }
 
 impl Channel {
+    const CC_MODULATION: usize = 1;
+    const CC_VOLUME: usize = 7;
+    const CC_PAN: usize = 10;
+    const CC_EXPRESSION: usize = 11;
+    const CC_HOLD_PEDAL: usize = 64;
+    const CC_REVERB_SEND: usize = 91;
+    const CC_CHORUS_SEND: usize = 93;
+
     pub(crate) fn new(is_percussion_channel: bool) -> Self {
         let mut channel = Self {
             is_percussion_channel,
@@ -45,8 +58,9 @@ impl Channel {
             pan: 0,
             expression: 0,
             hold_pedal: false,
-            reverb_send: 0,
-            chorus_send: 0,
+            cc: [0; 128],
+            channel_pressure: 0,
+            poly_pressure: [0; 128],
             rpn: 0,
             pitch_bend_range: 0,
             coarse_tune: 0,
@@ -70,8 +84,19 @@ impl Channel {
         self.expression = 127 << 7;
         self.hold_pedal = false;
 
-        self.reverb_send = 40;
-        self.chorus_send = 0;
+        self.cc = [0; 128];
+        // Keep the raw entries for the 14-bit controllers consistent with the
+        // fields above, and preserve the long-standing default of a nonzero
+        // reverb send.
+        self.cc[Channel::CC_MODULATION] = 0;
+        self.cc[Channel::CC_VOLUME] = 100;
+        self.cc[Channel::CC_PAN] = 64;
+        self.cc[Channel::CC_EXPRESSION] = 127;
+        self.cc[Channel::CC_REVERB_SEND] = 40;
+        self.cc[Channel::CC_CHORUS_SEND] = 0;
+
+        self.channel_pressure = 0;
+        self.poly_pressure = [0; 128];
 
         self.rpn = -1;
         self.pitch_bend_range = 2 << 7;
@@ -89,6 +114,17 @@ impl Channel {
         self.rpn = -1;
 
         self.pitch_bend = 0_f32;
+
+        // Mirror the above into the raw controller state, and reset the
+        // pressures with it. Volume, pan and the effect sends are deliberately
+        // left alone, matching both the GM spec and this method's existing
+        // behavior.
+        self.cc[Channel::CC_MODULATION] = 0;
+        self.cc[Channel::CC_EXPRESSION] = 127;
+        self.cc[Channel::CC_HOLD_PEDAL] = 0;
+
+        self.channel_pressure = 0;
+        self.poly_pressure = [0; 128];
     }
 
     pub(crate) fn set_bank(&mut self, value: i32) {
@@ -140,11 +176,29 @@ impl Channel {
     }
 
     pub(crate) fn set_reverb_send(&mut self, value: i32) {
-        self.reverb_send = value as u8;
+        self.cc[Channel::CC_REVERB_SEND] = value as u8;
     }
 
     pub(crate) fn set_chorus_send(&mut self, value: i32) {
-        self.chorus_send = value as u8;
+        self.cc[Channel::CC_CHORUS_SEND] = value as u8;
+    }
+
+    /// Records a controller this synthesizer has no dedicated field for, so
+    /// that a font modulator naming it can be honored.
+    pub(crate) fn set_cc(&mut self, index: i32, value: i32) {
+        if (0..128).contains(&index) {
+            self.cc[index as usize] = (value & 0x7F) as u8;
+        }
+    }
+
+    pub(crate) fn set_channel_pressure(&mut self, value: i32) {
+        self.channel_pressure = (value & 0x7F) as u8;
+    }
+
+    pub(crate) fn set_poly_pressure(&mut self, key: i32, value: i32) {
+        if (0..128).contains(&key) {
+            self.poly_pressure[key as usize] = (value & 0x7F) as u8;
+        }
     }
 
     pub(crate) fn set_rpn_coarse(&mut self, value: i32) {
@@ -224,11 +278,44 @@ impl Channel {
     }
 
     pub(crate) fn get_reverb_send(&self) -> f32 {
-        (1_f32 / 127_f32) * self.reverb_send as f32
+        (1_f32 / 127_f32) * self.cc[Channel::CC_REVERB_SEND] as f32
     }
 
     pub(crate) fn get_chorus_send(&self) -> f32 {
-        (1_f32 / 127_f32) * self.chorus_send as f32
+        (1_f32 / 127_f32) * self.cc[Channel::CC_CHORUS_SEND] as f32
+    }
+
+    pub(crate) fn get_cc(&self, index: u8) -> u8 {
+        self.cc[(index & 0x7F) as usize]
+    }
+
+    pub(crate) fn get_channel_pressure(&self) -> u8 {
+        self.channel_pressure
+    }
+
+    pub(crate) fn get_poly_pressure(&self, key: i32) -> u8 {
+        if (0..128).contains(&key) {
+            self.poly_pressure[key as usize]
+        } else {
+            0
+        }
+    }
+
+    /// Modulation depth as a plain 0..1 fraction, for modulator sources.
+    /// `get_modulation` returns cents instead, for the legacy vibrato path.
+    pub(crate) fn get_modulation_normalized(&self) -> f32 {
+        (1_f32 / 16383_f32) * self.modulation as f32
+    }
+
+    /// Pan as a 0..1 fraction rather than the -50..50 that `get_pan` returns.
+    pub(crate) fn get_pan_normalized(&self) -> f32 {
+        (1_f32 / 16383_f32) * self.pan as f32
+    }
+
+    /// Pitch wheel deflection as a 0..1 fraction, centred at 0.5, which is
+    /// what a modulator source expects. `get_pitch_bend` returns semitones.
+    pub(crate) fn get_pitch_bend_normalized(&self) -> f32 {
+        0.5_f32 * (self.pitch_bend + 1_f32)
     }
 
     pub(crate) fn get_pitch_bend_range(&self) -> f32 {
