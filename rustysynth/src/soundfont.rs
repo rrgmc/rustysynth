@@ -6,11 +6,13 @@ use crate::binary_reader::BinaryReader;
 use crate::error::SoundFontError;
 use crate::four_cc::FourCC;
 use crate::instrument::Instrument;
+use crate::instrument_region::InstrumentRegion;
 use crate::preset::Preset;
 use crate::sample_header::SampleHeader;
 use crate::soundfont_info::SoundFontInfo;
 use crate::soundfont_parameters::SoundFontParameters;
 use crate::soundfont_sampledata::SoundFontSampleData;
+use crate::soundfont_warning::{RegionDefect, SoundFontWarning, WarningCollector};
 use crate::LoopMode;
 
 /// Reperesents a SoundFont.
@@ -23,6 +25,8 @@ pub struct SoundFont {
     pub(crate) sample_headers: Vec<SampleHeader>,
     pub(crate) presets: Vec<Preset>,
     pub(crate) instruments: Vec<Instrument>,
+    pub(crate) warnings: Vec<SoundFontWarning>,
+    pub(crate) warning_count: usize,
 }
 
 impl SoundFont {
@@ -47,50 +51,115 @@ impl SoundFont {
             });
         }
 
-        let info = SoundFontInfo::new(reader)?;
-        let sample_data = SoundFontSampleData::new(reader)?;
-        let parameters = SoundFontParameters::new(reader)?;
+        let mut collector = WarningCollector::new();
 
-        let sound_font = Self {
+        let info = SoundFontInfo::new(reader, &mut collector)?;
+        let sample_data = SoundFontSampleData::new(reader, &mut collector)?;
+        let parameters = SoundFontParameters::new(reader, &mut collector)?;
+
+        let mut sound_font = Self {
             info,
             bits_per_sample: sample_data.bits_per_sample,
             wave_data: sample_data.wave_data,
             sample_headers: parameters.sample_headers,
             presets: parameters.presets,
             instruments: parameters.instruments,
+            warnings: Vec::new(),
+            warning_count: 0,
         };
 
-        sound_font.sanity_check()?;
+        sound_font.drop_unplayable_regions(&mut collector)?;
+
+        let (warnings, warning_count) = collector.into_parts();
+        sound_font.warnings = warnings;
+        sound_font.warning_count = warning_count;
 
         Ok(sound_font)
     }
 
-    fn sanity_check(&self) -> Result<(), SoundFontError> {
-        // https://github.com/sinshu/rustysynth/issues/22
-        // https://github.com/sinshu/rustysynth/issues/33
-        // https://github.com/sinshu/rustysynth/pull/51
-        for instrument in &self.instruments {
-            for region in &instrument.regions {
-                let start = region.get_sample_start();
-                let end = region.get_sample_end();
-                let start_loop = region.get_sample_start_loop();
-                let end_loop = region.get_sample_end_loop();
-                let loop_mode = region.get_sample_modes();
+    /// Drops every instrument region whose resolved sample addressing cannot be
+    /// played, and records each one.
+    ///
+    /// The conditions are unchanged from when failing any one of them rejected
+    /// the whole file; what changed is the scope. Crisis General Midi 3.01 has
+    /// exactly one bad record out of 5,007 sample headers, and refusing its
+    /// other 1,611 MiB over that served nobody. The checks themselves still
+    /// matter - they are what stops the oscillator indexing outside the wave
+    /// data - so a region that fails one is dropped rather than tolerated.
+    ///
+    /// The issues they came from:
+    /// <https://github.com/sinshu/rustysynth/issues/22>,
+    /// <https://github.com/sinshu/rustysynth/issues/33>,
+    /// <https://github.com/sinshu/rustysynth/pull/51>.
+    fn drop_unplayable_regions(
+        &mut self,
+        warnings: &mut WarningCollector,
+    ) -> Result<(), SoundFontError> {
+        let wave_data_len = self.wave_data.len();
+        let mut kept: usize = 0;
 
-                if start < 0
-                    || start_loop < 0
-                    || end as usize >= self.wave_data.len()
-                    || end_loop as usize >= self.wave_data.len()
-                    || end <= start
-                    || end_loop < start_loop
-                    || (loop_mode != LoopMode::NoLoop && start_loop >= end_loop)
-                {
-                    return Err(SoundFontError::SanityCheckFailed);
+        for (instrument_id, instrument) in self.instruments.iter_mut().enumerate() {
+            let mut region_index: usize = 0;
+            instrument.regions.retain(|region| {
+                let index = region_index;
+                region_index += 1;
+
+                match SoundFont::region_defect(region, wave_data_len) {
+                    None => {
+                        kept += 1;
+                        true
+                    }
+                    Some(defect) => {
+                        warnings.push(SoundFontWarning::RegionOutOfRange {
+                            instrument_id,
+                            region_index: index,
+                            defect,
+                        });
+                        false
+                    }
                 }
-            }
+            });
+        }
+
+        // A font with nothing left to play is not a font, and saying so is more
+        // use than handing back something that renders silence.
+        if kept == 0 {
+            return Err(SoundFontError::SanityCheckFailed);
         }
 
         Ok(())
+    }
+
+    /// The first condition the region fails, or `None` if it is playable.
+    ///
+    /// The wave data bounds are `>=` rather than `>`: the oscillator
+    /// interpolates between `data[index]` and `data[index + 1]` for every index
+    /// below the end, so the end has to be a valid index itself. A negative end
+    /// casts to a huge `usize` and is caught by the same comparison.
+    fn region_defect(region: &InstrumentRegion, wave_data_len: usize) -> Option<RegionDefect> {
+        let start = region.get_sample_start();
+        let end = region.get_sample_end();
+        let start_loop = region.get_sample_start_loop();
+        let end_loop = region.get_sample_end_loop();
+        let loop_mode = region.get_sample_modes();
+
+        if start < 0 {
+            Some(RegionDefect::NegativeStart)
+        } else if start_loop < 0 {
+            Some(RegionDefect::NegativeLoopStart)
+        } else if end as usize >= wave_data_len {
+            Some(RegionDefect::EndPastWaveData)
+        } else if end_loop as usize >= wave_data_len {
+            Some(RegionDefect::LoopEndPastWaveData)
+        } else if end <= start {
+            Some(RegionDefect::EmptySample)
+        } else if end_loop < start_loop {
+            Some(RegionDefect::InvertedLoop)
+        } else if loop_mode != LoopMode::NoLoop && start_loop >= end_loop {
+            Some(RegionDefect::EmptyLoop)
+        } else {
+            None
+        }
     }
 
     /// Gets the information of the SoundFont.
@@ -121,6 +190,24 @@ impl SoundFont {
     /// Gets the instruments of the SoundFont.
     pub fn get_instruments(&self) -> &[Instrument] {
         &self.instruments[..]
+    }
+
+    /// Gets what the SoundFont got wrong, and what was done about it.
+    ///
+    /// Empty for a well-formed font. A non-empty list means the font loaded
+    /// with records dropped, which is worth surfacing: it is the difference
+    /// between "this bank plays" and "this bank plays as its author intended".
+    ///
+    /// Only the first few are kept - see [`SoundFont::get_warning_count`] for
+    /// how many there were altogether.
+    pub fn get_warnings(&self) -> &[SoundFontWarning] {
+        &self.warnings[..]
+    }
+
+    /// Gets how many warnings the load produced, including any past the number
+    /// [`SoundFont::get_warnings`] keeps.
+    pub fn get_warning_count(&self) -> usize {
+        self.warning_count
     }
 }
 

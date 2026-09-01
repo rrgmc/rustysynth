@@ -4,6 +4,7 @@ use crate::error::SoundFontError;
 use crate::instrument::Instrument;
 use crate::preset_info::PresetInfo;
 use crate::preset_region::PresetRegion;
+use crate::soundfont_warning::{SoundFontWarning, WarningCollector};
 use crate::zone::Zone;
 
 /// Represents a preset in the SoundFont.
@@ -20,25 +21,43 @@ pub struct Preset {
 }
 
 impl Preset {
+    /// Builds one preset, or `None` if it has no zones at all.
+    ///
+    /// Unlike an instrument, a preset with no regions is worse than no preset:
+    /// nothing addresses presets by position - the synthesizer looks them up
+    /// by bank and patch - so an empty one would be found, play silence, and
+    /// suppress the fallback to bank 0 that would otherwise have given the
+    /// caller a usable instrument.
     fn new(
         info: &PresetInfo,
         preset_id: usize,
         zones: &[Zone],
         instruments: &[Instrument],
-    ) -> Result<Self, SoundFontError> {
+        warnings: &mut WarningCollector,
+    ) -> Result<Option<Self>, SoundFontError> {
         let name = info.name.clone();
 
         let zone_count = info.zone_end_index - info.zone_start_index + 1;
-        if zone_count <= 0 {
+        if zone_count < 0 || info.zone_start_index < 0 {
             return Err(SoundFontError::InvalidPreset(preset_id));
+        }
+        if zone_count == 0 {
+            warnings.push(SoundFontWarning::PresetWithoutZone(preset_id));
+            return Ok(None);
         }
 
         let span_start = info.zone_start_index as usize;
         let span_end = span_start + zone_count as usize;
-        let zone_span = &zones[span_start..span_end];
-        let regions = PresetRegion::create(preset_id, zone_span, instruments)?;
+        let zone_span = zones
+            .get(span_start..span_end)
+            .ok_or(SoundFontError::InvalidZoneList)?;
+        let regions = PresetRegion::create(preset_id, zone_span, instruments, warnings);
+        if regions.is_empty() {
+            warnings.push(SoundFontWarning::PresetWithoutZone(preset_id));
+            return Ok(None);
+        }
 
-        Ok(Self {
+        Ok(Some(Self {
             name,
             patch_number: info.patch_number,
             bank_number: info.bank_number,
@@ -46,13 +65,14 @@ impl Preset {
             genre: info.genre,
             morphology: info.morphology,
             regions,
-        })
+        }))
     }
 
     pub(crate) fn create(
         infos: &[PresetInfo],
         zones: &[Zone],
         instruments: &[Instrument],
+        warnings: &mut WarningCollector,
     ) -> Result<Vec<Preset>, SoundFontError> {
         if infos.len() <= 1 {
             return Err(SoundFontError::PresetNotFound);
@@ -63,7 +83,14 @@ impl Preset {
 
         let mut presets: Vec<Preset> = Vec::new();
         for (preset_id, info) in infos.iter().take(count).enumerate() {
-            presets.push(Preset::new(info, preset_id, zones, instruments)?);
+            if let Some(preset) = Preset::new(info, preset_id, zones, instruments, warnings)? {
+                presets.push(preset);
+            }
+        }
+
+        // A font every one of whose presets was dropped has nothing to play.
+        if presets.is_empty() {
+            return Err(SoundFontError::PresetNotFound);
         }
 
         Ok(presets)

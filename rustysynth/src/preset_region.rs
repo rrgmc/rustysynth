@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use crate::error::SoundFontError;
 use crate::generator::Generator;
 use crate::generator_type::GeneratorType;
 use crate::instrument::Instrument;
 use crate::modulator::Modulator;
 use crate::soundfont_math::SoundFontMath;
+use crate::soundfont_warning::{SoundFontWarning, WarningCollector};
 use crate::zone::Zone;
 
 fn set_parameter(gs: &mut [i16; GeneratorType::COUNT], generator: &Generator) {
@@ -32,12 +32,17 @@ pub struct PresetRegion {
 }
 
 impl PresetRegion {
+    /// Builds one region, or `None` if the zone does not name an instrument
+    /// that exists. A dropped zone is recorded rather than rejecting the whole
+    /// font.
     fn new(
         preset_id: usize,
+        zone_index: usize,
         global: &Zone,
         local: &Zone,
         samples: &[Instrument],
-    ) -> Result<Self, SoundFontError> {
+        warnings: &mut WarningCollector,
+    ) -> Option<Self> {
         let mut gs: [i16; GeneratorType::COUNT] = [0; GeneratorType::COUNT];
         gs[GeneratorType::KEY_RANGE as usize] = 0x7F00;
         gs[GeneratorType::VELOCITY_RANGE as usize] = 0x7F00;
@@ -54,15 +59,32 @@ impl PresetRegion {
         Modulator::merge(&mut modulators, &global.modulators);
         Modulator::merge(&mut modulators, &local.modulators);
 
+        // The preset-layer counterpart of an instrument zone's `sampleID`: a
+        // non-global preset zone has to name an instrument. Without one it
+        // used to fall through to the zero-initialized slot below and play
+        // instrument 0.
+        if !local
+            .generators
+            .iter()
+            .any(|generator| generator.generator_type == GeneratorType::INSTRUMENT)
+        {
+            warnings.push(SoundFontWarning::PresetZoneWithoutInstrument {
+                preset_id,
+                zone_index,
+            });
+            return None;
+        }
+
         let instrument_id = gs[GeneratorType::INSTRUMENT as usize] as usize;
         if instrument_id >= samples.len() {
-            return Err(SoundFontError::InvalidInstrumentId {
+            warnings.push(SoundFontWarning::PresetInvalidInstrumentId {
                 preset_id,
                 instrument_id,
             });
+            return None;
         }
 
-        Ok(Self {
+        Some(Self {
             gs,
             modulators,
             instrument: instrument_id,
@@ -73,7 +95,14 @@ impl PresetRegion {
         preset_id: usize,
         zones: &[Zone],
         instruments: &[Instrument],
-    ) -> Result<Vec<PresetRegion>, SoundFontError> {
+        warnings: &mut WarningCollector,
+    ) -> Vec<PresetRegion> {
+        // A preset with an empty bag span has no regions. Indexing zone 0
+        // below would panic.
+        if zones.is_empty() {
+            return Vec::new();
+        }
+
         // Is the first one the global zone?
         if zones[0].generators.is_empty()
             || zones[0].generators.last().unwrap().generator_type != GeneratorType::INSTRUMENT
@@ -82,32 +111,23 @@ impl PresetRegion {
             let global = &zones[0];
 
             // The global zone is regarded as the base setting of subsequent zones.
-            let count = zones.len() - 1;
-            let mut regions: Vec<PresetRegion> = Vec::new();
-            for i in 0..count {
-                regions.push(PresetRegion::new(
-                    preset_id,
-                    global,
-                    &zones[i + 1],
-                    instruments,
-                )?);
-            }
-
-            Ok(regions)
+            zones[1..]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, local)| {
+                    PresetRegion::new(preset_id, i + 1, global, local, instruments, warnings)
+                })
+                .collect()
         } else {
             // No global zone.
-            let count = zones.len();
-            let mut regions: Vec<PresetRegion> = Vec::new();
-            for zone in zones.iter().take(count) {
-                regions.push(PresetRegion::new(
-                    preset_id,
-                    &Zone::empty(),
-                    zone,
-                    instruments,
-                )?);
-            }
-
-            Ok(regions)
+            let empty = Zone::empty();
+            zones
+                .iter()
+                .enumerate()
+                .filter_map(|(i, local)| {
+                    PresetRegion::new(preset_id, i, &empty, local, instruments, warnings)
+                })
+                .collect()
         }
     }
 

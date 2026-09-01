@@ -6,6 +6,7 @@ use crate::binary_reader::BinaryReader;
 use crate::error::SoundFontError;
 use crate::four_cc::FourCC;
 use crate::read_counter::ReadCounter;
+use crate::soundfont_warning::{SoundFontWarning, WarningCollector};
 
 #[non_exhaustive]
 pub(crate) struct SoundFontSampleData {
@@ -14,7 +15,12 @@ pub(crate) struct SoundFontSampleData {
 }
 
 impl SoundFontSampleData {
-    pub(crate) fn new<R: Read>(reader: &mut R) -> Result<Self, SoundFontError> {
+    pub(crate) fn new<R: Read>(
+        reader: &mut R,
+        warnings: &mut WarningCollector,
+    ) -> Result<Self, SoundFontError> {
+        const LIST: FourCC = FourCC::from_bytes(*b"sdta");
+
         let chunk_id = BinaryReader::read_four_cc(reader)?;
         if chunk_id != b"LIST" {
             return Err(SoundFontError::ListChunkNotFound);
@@ -40,7 +46,22 @@ impl SoundFontSampleData {
             match id.as_bytes() {
                 b"smpl" => wave_data = Some(BinaryReader::read_wave_data(reader, size)?),
                 b"sm24" => BinaryReader::discard_data(reader, size)?,
-                _ => return Err(SoundFontError::ListContainsUnknownId(id)),
+                _ => {
+                    // Skipping an unknown chunk is only safe while its size is
+                    // believable. One claiming more than the list has left
+                    // means the stream has desynchronised, and skipping it
+                    // would swallow the rest of the file.
+                    if size > end - reader.bytes_read() {
+                        return Err(SoundFontError::ListContainsUnknownId { list: LIST, id });
+                    }
+                    warnings.push(SoundFontWarning::UnknownChunk { list: LIST, id });
+                    BinaryReader::discard_data(reader, size)?;
+                }
+            }
+
+            // RIFF pads an odd-sized chunk to an even boundary.
+            if size % 2 == 1 {
+                BinaryReader::discard_data(reader, 1)?;
             }
         }
 

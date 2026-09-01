@@ -62,7 +62,10 @@ pub enum SoundFontError {
         expected: FourCC,
         actual: FourCC,
     },
-    ListContainsUnknownId(FourCC),
+    ListContainsUnknownId {
+        list: FourCC,
+        id: FourCC,
+    },
     SampleDataNotFound,
     UnsupportedSampleFormat,
     SubChunkNotFound(FourCC),
@@ -113,9 +116,10 @@ impl fmt::Display for SoundFontError {
                 "the type of the LIST chunk must be '{}', but was '{}'",
                 expected, actual
             ),
-            SoundFontError::ListContainsUnknownId(id) => {
-                write!(f, "the INFO list contains an unknown ID '{id}'")
-            }
+            SoundFontError::ListContainsUnknownId { list, id } => write!(
+                f,
+                "the '{list}' list contains an unknown ID '{id}' whose size runs past the end of the list"
+            ),
             SoundFontError::SampleDataNotFound => write!(f, "no valid sample data was found"),
             SoundFontError::UnsupportedSampleFormat => write!(f, "SoundFont3 is not yet supported"),
             SoundFontError::SubChunkNotFound(id) => {

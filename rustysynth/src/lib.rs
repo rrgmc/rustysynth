@@ -24,6 +24,7 @@ mod soundfont_math;
 mod soundfont_parameters;
 mod soundfont_sampledata;
 mod soundfont_version;
+mod soundfont_warning;
 mod zone;
 mod zone_info;
 
@@ -65,5 +66,7 @@ pub use self::sample_header::SampleHeader;
 pub use self::soundfont::SoundFont;
 pub use self::soundfont_info::SoundFontInfo;
 pub use self::soundfont_version::SoundFontVersion;
+pub use self::soundfont_warning::RegionDefect;
+pub use self::soundfont_warning::SoundFontWarning;
 pub use self::synthesizer::Synthesizer;
 pub use self::synthesizer_settings::SynthesizerSettings;

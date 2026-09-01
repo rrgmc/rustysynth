@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 
 use crate::default_modulators::DEFAULT_MODULATORS;
-use crate::error::SoundFontError;
 use crate::generator::Generator;
 use crate::generator_type::GeneratorType;
 use crate::loop_mode::LoopMode;
 use crate::modulator::Modulator;
 use crate::sample_header::SampleHeader;
 use crate::soundfont_math::SoundFontMath;
+use crate::soundfont_warning::{SoundFontWarning, WarningCollector};
 use crate::zone::Zone;
 
 fn set_parameter(gs: &mut [i16; GeneratorType::COUNT], generator: &Generator) {
@@ -42,12 +42,17 @@ pub struct InstrumentRegion {
 }
 
 impl InstrumentRegion {
+    /// Builds one region, or `None` if the zone does not describe a playable
+    /// one. A dropped zone is recorded rather than rejecting the whole font:
+    /// one unplayable region out of thousands is not a reason to refuse a bank.
     fn new(
         instrument_id: usize,
+        zone_index: usize,
         global: &Zone,
         local: &Zone,
         samples: &[SampleHeader],
-    ) -> Result<Self, SoundFontError> {
+        warnings: &mut WarningCollector,
+    ) -> Option<Self> {
         let mut gs: [i16; GeneratorType::COUNT] = [0; GeneratorType::COUNT];
         gs[GeneratorType::INITIAL_FILTER_CUTOFF_FREQUENCY as usize] = 13500;
         gs[GeneratorType::DELAY_MODULATION_LFO as usize] = -12000;
@@ -85,16 +90,33 @@ impl InstrumentRegion {
         Modulator::merge(&mut resolved_modulators, &global.modulators);
         Modulator::merge(&mut resolved_modulators, &local.modulators);
 
+        // SF2 2.04 section 7.7 requires a `sampleID` generator to terminate
+        // every non-global instrument zone. A zone without one used to fall
+        // through to the zero-initialized slot below and silently play sample
+        // 0, which is both wrong and a way for a zone that names nothing to
+        // resolve to addresses that fail the sanity check.
+        if !local
+            .generators
+            .iter()
+            .any(|generator| generator.generator_type == GeneratorType::SAMPLE_ID)
+        {
+            warnings.push(SoundFontWarning::ZoneWithoutSampleId {
+                instrument_id,
+                zone_index,
+            });
+            return None;
+        }
+
         let sample_id = gs[GeneratorType::SAMPLE_ID as usize] as usize;
-        if sample_id >= samples.len() {
-            return Err(SoundFontError::InvalidSampleId {
+        let Some(sample) = samples.get(sample_id) else {
+            warnings.push(SoundFontWarning::RegionInvalidSampleId {
                 instrument_id,
                 sample_id,
             });
-        }
-        let sample = &samples[sample_id];
+            return None;
+        };
 
-        Ok(Self {
+        Some(Self {
             gs,
             modulators,
             resolved_modulators,
@@ -112,7 +134,15 @@ impl InstrumentRegion {
         instrument_id: usize,
         zones: &[Zone],
         samples: &[SampleHeader],
-    ) -> Result<Vec<InstrumentRegion>, SoundFontError> {
+        warnings: &mut WarningCollector,
+    ) -> Vec<InstrumentRegion> {
+        // An instrument with an empty bag span has no regions. It used to be
+        // impossible to reach here - the caller rejected the whole file first -
+        // and indexing zone 0 below would panic.
+        if zones.is_empty() {
+            return Vec::new();
+        }
+
         // Is the first one the global zone?
         if zones[0].generators.is_empty()
             || zones[0].generators.last().unwrap().generator_type != GeneratorType::SAMPLE_ID
@@ -121,32 +151,23 @@ impl InstrumentRegion {
             let global = &zones[0];
 
             // The global zone is regarded as the base setting of subsequent zones.
-            let count = zones.len() - 1;
-            let mut regions: Vec<InstrumentRegion> = Vec::new();
-            for i in 0..count {
-                regions.push(InstrumentRegion::new(
-                    instrument_id,
-                    global,
-                    &zones[i + 1],
-                    samples,
-                )?);
-            }
-
-            Ok(regions)
+            zones[1..]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, local)| {
+                    InstrumentRegion::new(instrument_id, i + 1, global, local, samples, warnings)
+                })
+                .collect()
         } else {
             // No global zone.
-            let count = zones.len();
-            let mut regions: Vec<InstrumentRegion> = Vec::new();
-            for zone in zones.iter().take(count) {
-                regions.push(InstrumentRegion::new(
-                    instrument_id,
-                    &Zone::empty(),
-                    zone,
-                    samples,
-                )?);
-            }
-
-            Ok(regions)
+            let empty = Zone::empty();
+            zones
+                .iter()
+                .enumerate()
+                .filter_map(|(i, local)| {
+                    InstrumentRegion::new(instrument_id, i, &empty, local, samples, warnings)
+                })
+                .collect()
         }
     }
 
