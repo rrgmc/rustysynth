@@ -22,15 +22,20 @@ impl Zone {
         generators: &[Generator],
         modulators: &[Modulator],
     ) -> Result<Self, SoundFontError> {
-        let mut segment: Vec<Generator> = Vec::new();
-
-        for i in 0..info.generator_count {
-            segment.push(generators[(info.generator_index + i) as usize]);
+        // Sliced rather than indexed, the same way the modulators below are.
+        // The generator loop used to index straight into the slice, so a bag
+        // record pointing past the end of `pgen` or `igen` panicked instead of
+        // reporting an invalid file.
+        if info.generator_index < 0 || info.generator_count < 0 {
+            return Err(SoundFontError::InvalidGeneratorList);
         }
+        let start = info.generator_index as usize;
+        let end = start + info.generator_count as usize;
+        let segment = generators
+            .get(start..end)
+            .ok_or(SoundFontError::InvalidGeneratorList)?
+            .to_vec();
 
-        // Sliced rather than indexed. The generator loop above trusts the file,
-        // which this crate has been bitten by before; there is no reason to add
-        // a second place that does.
         if info.modulator_index < 0 || info.modulator_count < 0 {
             return Err(SoundFontError::InvalidModulatorList);
         }
