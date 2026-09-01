@@ -330,3 +330,99 @@ impl Channel {
         self.get_pitch_bend_range() * self.pitch_bend
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The effect sends are stored in the raw controller array now rather than
+    /// in fields of their own, so the long-standing quirk that a reset leaves
+    /// the reverb send at 40 has to survive the move.
+    #[test]
+    fn reset_leaves_the_reverb_send_at_forty() {
+        let mut channel = Channel::new(false);
+
+        channel.set_reverb_send(0);
+        assert_eq!(channel.get_reverb_send(), 0_f32);
+
+        channel.reset();
+        assert_eq!(channel.get_cc(91), 40);
+        assert!((channel.get_reverb_send() - 40_f32 / 127_f32).abs() < 1.0e-6);
+        assert_eq!(channel.get_chorus_send(), 0_f32);
+    }
+
+    /// Reset all controllers deliberately preserves volume, pan and the sends.
+    /// A modulator reading any of them has to see the same value the dedicated
+    /// getter does.
+    #[test]
+    fn reset_all_controllers_preserves_volume_pan_and_sends() {
+        let mut channel = Channel::new(false);
+
+        channel.set_volume_coarse(90);
+        channel.set_pan_coarse(20);
+        channel.set_reverb_send(100);
+        channel.set_chorus_send(80);
+        channel.set_cc(91, 100);
+        channel.set_cc(93, 80);
+        channel.set_modulation_coarse(64);
+        channel.set_cc(1, 64);
+        channel.set_channel_pressure(90);
+        channel.set_poly_pressure(60, 70);
+
+        channel.reset_all_controllers();
+
+        assert_eq!(channel.get_cc(91), 100);
+        assert_eq!(channel.get_cc(93), 80);
+        assert!((channel.get_volume() - (90 << 7) as f32 / 16383_f32).abs() < 1.0e-6);
+        assert!(
+            (channel.get_pan() - ((100_f32 / 16383_f32) * (20 << 7) as f32 - 50_f32)).abs()
+                < 1.0e-4
+        );
+
+        // Modulation, expression and both pressures are reset.
+        assert_eq!(channel.get_modulation(), 0_f32);
+        assert_eq!(channel.get_cc(1), 0);
+        assert_eq!(channel.get_cc(11), 127);
+        assert_eq!(channel.get_channel_pressure(), 0);
+        assert_eq!(channel.get_poly_pressure(60), 0);
+    }
+
+    /// A modulator may name any controller, including ones out of range and
+    /// ones this synthesizer has no dedicated handling for.
+    #[test]
+    fn arbitrary_controllers_are_recorded_and_read_back() {
+        let mut channel = Channel::new(false);
+
+        channel.set_cc(74, 100);
+        assert_eq!(channel.get_cc(74), 100);
+
+        // Values are masked to seven bits, and out-of-range indices are
+        // ignored rather than panicking.
+        channel.set_cc(74, 200);
+        assert_eq!(channel.get_cc(74), 200 & 0x7F);
+        channel.set_cc(-1, 100);
+        channel.set_cc(999, 100);
+
+        channel.set_poly_pressure(-5, 100);
+        channel.set_poly_pressure(999, 100);
+        assert_eq!(channel.get_poly_pressure(-5), 0);
+        assert_eq!(channel.get_poly_pressure(999), 0);
+    }
+
+    /// Pitch wheel sensitivity is read through the fractional accessor, not by
+    /// shifting the raw value, so an RPN 0 fine adjustment is not silently
+    /// dropped.
+    #[test]
+    fn pitch_bend_normalization_spans_zero_to_one() {
+        let mut channel = Channel::new(false);
+
+        channel.set_pitch_bend(0, 0);
+        assert!(channel.get_pitch_bend_normalized().abs() < 1.0e-4);
+
+        channel.set_pitch_bend(0, 64);
+        assert!((channel.get_pitch_bend_normalized() - 0.5_f32).abs() < 1.0e-4);
+
+        channel.set_pitch_bend(0x7F, 0x7F);
+        assert!((channel.get_pitch_bend_normalized() - 1_f32).abs() < 1.0e-3);
+    }
+}
