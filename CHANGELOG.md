@@ -1,3 +1,90 @@
+# v1.5.0
+
+**A SoundFont with one bad record now loads without it, rather than not loading at all.** A karaoke
+application surveying fifteen General MIDI banks found four of them unopenable and called this the
+limitation with the widest reach: pointing a setting at a bank found on the internet had a material
+chance of producing no instruments. In every case one record cost the whole file.
+
+- **Crisis General Midi 3.01** has exactly one sample header out of 5,007 whose loop end runs past
+  the wave data. That one record cost all 1,611 MiB.
+- **Timbres of Heaven (XGM) 4.00** has an instrument with an empty bag span, which cost the other
+  365 instruments.
+- **ColomboGMGS2, JNSGM and Timbres of Heaven 3.4** each fail the range check on a *region* while
+  their sample header tables are entirely clean, which is what a zone naming no sample looks like
+  once it has been bound to sample 0.
+
+Every check is kept - they are what stops the oscillator indexing outside the wave data - but each
+now drops the record that failed it. A font with no playable region left anywhere is still rejected
+with `SanityCheckFailed`: silence is not a more useful answer than an error.
+
+What was dropped is now reported. `SoundFont::get_warnings()` returns `SoundFontWarning` values
+naming the instrument, the region and which of the seven conditions it failed; `get_warning_count()`
+gives the total, since the kept list is capped at 64 so that a file which is simply not a SoundFont
+cannot turn a diagnostic into a memory problem. `RegionDefect` is the specific condition, so
+`"sanity check failed"` with nothing attached is no longer the whole story.
+
+Three decisions inside that are not obvious:
+
+- **An instrument with no zones is kept, empty; a preset with no usable zone is dropped.** Preset
+  regions address instruments by position, so removing an instrument would silently repoint every
+  later preset at the wrong one. Presets are found by bank and patch, so an empty one would be
+  found, play nothing, and suppress the fallback to bank 0 that would otherwise have produced a
+  usable instrument.
+- **A zone carrying no `sampleID` is dropped rather than played.** It used to fall through to a
+  zero-initialized generator slot and silently play sample 0. SF2 2.04 section 7.7 requires one.
+  The same rule applies to a preset zone with no `instrument`.
+- **An unknown chunk id is skipped rather than refusing the bank**, in all three lists, bounded by
+  what is left of the enclosing list so that a desynchronised stream still fails instead of
+  swallowing the rest of the file.
+
+Also fixed in the parser:
+
+- **`read_wave_data` wrote one byte past its allocation.** It allocated `size / 2` samples - so
+  `size - 1` bytes for an odd `size` - then built an unsafe slice of `size` bytes over that
+  allocation and read into it. Nothing rejected an odd `smpl` size and the value comes straight out
+  of the file. It now reads in blocks with no `unsafe` at all, which also makes it correct on a
+  big-endian target, and reserves with `try_reserve_exact` so an impossible size is an error rather
+  than an abort.
+- **`discard_data` allocated and zeroed whatever a chunk header claimed** before reading a byte of
+  it, so an `sm24` declaring `0xFFFFFFFF` asked for four gigabytes. It now reads through a sink.
+- **`Zone::new` indexed straight into `pgen`/`igen`**, so a bag record pointing past the end
+  panicked rather than reporting an invalid file. The modulator slice beside it was already written
+  defensively, with a comment saying why.
+- **RIFF's pad byte after an odd-sized chunk is consumed**, which nothing did before, so a font
+  carrying one desynchronised and surfaced as a nonsensical unknown id further along.
+- **`ifil` and `iver` respect their declared size** rather than always reading four bytes and
+  leaving the stream misaligned.
+- `ListContainsUnknownId` now names which list it came from; it claimed `INFO` even when raised from
+  `sdta` or `pdta`. `SubChunkNotFound` reports the lowercase ids that are actually on disk rather
+  than uppercased ones.
+
+Measured, because leniency that changes what a working font sounds like would be a bad trade:
+
+- **600 files sampled from a 616,563 file corpus render identically**, through GeneralUser GS 2.0.3
+  and through FluidR3_GM, against the same corpus rendered by the previous build. One row of 600
+  differs in each, and it is a MIDI file that failed to parse both before and after - only the
+  wording of its error moved, from `failed to fill whole buffer` to `unexpected end of file`, which
+  is `discard_data` no longer going through `read_exact`. No file that rendered renders differently.
+- **Six real banks load with zero warnings**: FluidR3_GM, GeneralUser GS 2.0.3, MuseScore_General,
+  Roland SC-55 v3.7, SC-55 v1.2b and TimGM6mb. Nothing is dropped from a well-formed bank, and
+  their preset and sample counts match the survey's published figures exactly.
+- The golden render through TimGM6mb is unchanged, which is what says the sample data still reads
+  identically after `read_wave_data` was rewritten.
+
+Six committed fixtures in `samples/` carry one defect each, built by `samples/make_test_malformed.py`;
+two are the shape of a named bank above. `rustysynth_regress load <sf2>...` reports what any font
+costs to open.
+
+**None of the four unopenable banks were available to test against**, so what is verified here is
+the mechanism and the absence of regression, not the claim that those specific files now play. What
+each of them needs is implemented and covered by a fixture; whether any of them carries a *second*
+defect beyond the one its survey identified is unknown until someone runs `load` against it.
+
+**Not addressed**, and still true of this crate: SF3 is refused, `sm24` is discarded and playback is
+16-bit, and the whole `smpl` chunk is held resident. SF3 is the one with real leverage - the same
+MuseScore bank is 38 MiB as `.sf3` against 206 MiB as `.sf2` - and would need an Ogg Vorbis decoder,
+so the shape it would take is an optional cargo feature, leaving default builds dependency-free.
+
 # v1.4.0
 
 - **SF2 modulators are now implemented.** The `pmod` and `imod` chunks were previously read and

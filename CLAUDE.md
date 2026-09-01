@@ -24,7 +24,7 @@ Cargo workspace with four members:
 
 ```sh
 cargo build                                    # or --release
-cargo test -p rustysynth                       # the tests that run with no setup (3 tests)
+cargo test -p rustysynth                       # the tests that run with no setup (40 tests)
 cargo test -p rustysynth test_load_reject_sf3  # a single test
 cargo clippy --all-targets                     # currently clean; keep it that way
 cargo fmt
@@ -49,11 +49,31 @@ new tests there, with a fixture in `samples/`, over adding to `rustysynth_test`.
 
 ### SoundFont loading
 
-`SoundFont::new` (`rustysynth/src/soundfont.rs:34`) walks the RIFF container:
-`SoundFontInfo` → `SoundFontSampleData` → `SoundFontParameters` → `sanity_check`
-(`soundfont.rs:68`), which rejects out-of-range sample and loop points — several past CVE-ish
-panics were fixed by tightening it. SoundFont3 is explicitly rejected with
+`SoundFont::new` (`rustysynth/src/soundfont.rs`) walks the RIFF container:
+`SoundFontInfo` → `SoundFontSampleData` → `SoundFontParameters` → `drop_unplayable_regions`, which
+checks every region's out-of-range sample and loop points — several past CVE-ish panics were fixed
+by tightening it. SoundFont3 is explicitly rejected with
 `SoundFontError::UnsupportedSampleFormat`.
+
+**Loading is lenient, and says what it dropped.** As of v1.5.0 a bad record costs that record, not
+the file: an out-of-range region, a zone naming no sample, a preset with no usable zone, an unknown
+chunk id. Each one is recorded, and `SoundFont::get_warnings()` returns them
+(`soundfont_warning.rs`), with `get_warning_count()` for the total since the kept list is capped at
+64. A font with **no** playable region left anywhere is still `Err(SanityCheckFailed)`.
+
+Two asymmetries in that are load-bearing and easy to undo by accident:
+
+- An instrument with no zones is **kept, empty**; a preset with no usable zone is **dropped**.
+  `PresetRegion` resolves instruments by *position* (`preset_region.rs`), so removing an instrument
+  repoints every later preset at the wrong one. Presets are found by bank and patch, so an empty
+  one would be found, play silence, and suppress the bank-0 fallback in `synthesizer.rs`.
+- A zone is only a region if it actually carries the terminating generator SF2 7.7 requires —
+  `sampleID` for an instrument zone, `instrument` for a preset zone. Without that check `gs[]`'s
+  zero-initialized slot silently binds the zone to sample 0.
+
+Before changing any of this, re-run the corpus comparison: `rustysynth_regress render` on both
+builds then `compare`, which must report only rows that failed in both. Dropping a region that a
+font actually plays is the failure mode, and unit tests will not catch it.
 
 **SF2 modulators are implemented** (`modulator.rs`, `modulator_source.rs`,
 `default_modulators.rs`). `pmod` and `imod` are parsed into `Zone`, then merged onto regions by the
@@ -146,6 +166,7 @@ Final Fantasy CC116/117, or an explicit tick).
   non-breaking; construct them through their constructors.
 - Error enums (`SoundFontError`, `MidiFileError`, `SynthesizerError` in `error.rs`) do **no heap
   allocation** — they carry `FourCC` and integers, never `String`. Keep new variants allocation-free.
+  `SoundFontWarning` follows the same rule for the same reason.
 - Audio math is `f32`; `f64` is reserved for a few spots in `soundfont_math.rs` and for time in
   the sequencer.
 - `SynthesizerSettings::validate` (`synthesizer_settings.rs:38`) enforces sample rate
