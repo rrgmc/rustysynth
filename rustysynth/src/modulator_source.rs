@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::channel::Channel;
+use crate::soundfont_math::SoundFontMath;
 
 /// The source of a modulator: which controller drives it, and how that
 /// controller's value is shaped before it is applied.
@@ -61,7 +62,7 @@ impl ModulatorSource {
         }
     }
 
-    pub(crate) fn to_bits(&self) -> u16 {
+    pub(crate) fn to_bits(self) -> u16 {
         (self.index as u16 & 0x7F)
             | if self.is_cc { 0x0080 } else { 0 }
             | if self.is_negative { 0x0100 } else { 0 }
@@ -181,11 +182,11 @@ impl ModulatorSource {
 
     /// The SF2 concave curve over a normalized input.
     ///
-    /// Evaluated in closed form rather than through a table. A 128-entry table
-    /// - what FluidSynth uses, because all of its sources are 7-bit and land
-    /// exactly on entries - carries up to 6 dB of interpolation error here,
-    /// since RustySynth's 14-bit controllers land between entries and the
-    /// curve has a corner where it clamps.
+    /// Evaluated in closed form rather than through a table. FluidSynth can
+    /// use a 128-entry table because all of its sources are 7-bit and land
+    /// exactly on entries. RustySynth tracks four controllers at 14 bits, which
+    /// land between entries, and there the same table carries up to 6 dB of
+    /// interpolation error at the corner where the curve clamps.
     pub(crate) fn concave(v: f32) -> f32 {
         if v <= 0_f32 {
             return 0_f32;
@@ -236,13 +237,15 @@ impl ModulatorSource {
             return 1_f32;
         }
 
-        let mut v = self.raw_value(channel, key, velocity);
-        if !(v > 0_f32) {
-            // Also catches NaN, which must never reach the voice parameters.
-            v = 0_f32;
-        } else if v > 1_f32 {
-            v = 1_f32;
-        }
+        // A NaN here would propagate into the biquad coefficients and from
+        // there into the reverb and chorus state, which never recovers, so it
+        // is folded into the zero branch rather than clamped.
+        let raw = self.raw_value(channel, key, velocity);
+        let v = if raw.is_nan() {
+            0_f32
+        } else {
+            SoundFontMath::clamp(raw, 0_f32, 1_f32)
+        };
 
         if self.is_bipolar {
             let bipolar = 2_f32 * v - 1_f32;
@@ -269,8 +272,6 @@ impl ModulatorSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::soundfont_math::SoundFontMath;
 
     fn channel() -> Channel {
         Channel::new(false)
