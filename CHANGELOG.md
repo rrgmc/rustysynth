@@ -1,5 +1,10 @@
 # v1.5.0
 
+- Fixed an issue where a running status event following a meta or SysEx event was decoded with the
+  wrong status byte and silently discarded.
+- Fixed an issue where a track without an end-of-track meta event was parsed past the end of its
+  own chunk.
+
 **A SoundFont with one bad record now loads without it, rather than not loading at all.** A karaoke
 application surveying fifteen General MIDI banks found four of them unopenable and called this the
 limitation with the widest reach: pointing a setting at a bank found on the internet had a material

@@ -210,7 +210,9 @@ impl MidiFile {
         let mut tick: i32 = 0;
         let mut last_status: u8 = 0;
 
-        loop {
+        // Bounded by the chunk size so that a track without an EOT meta event, or one truncated
+        // mid-event, stops at its own chunk instead of parsing the next MTrk header as event data.
+        while reader.bytes_read() < size {
             let delta = BinaryReader::read_i32_variable_length(reader)?;
             let first = BinaryReader::read_u8(reader)?;
 
@@ -265,11 +267,21 @@ impl MidiFile {
                         messages.push(Message::common2(first, data1, data2, loop_type));
                         ticks.push(tick);
                     }
+
+                    // Only channel messages set the running status. SysEx and meta events cancel
+                    // it, so leaving it set here would decode the next running-status event with a
+                    // status byte of 0xF0 or 0xFF and silently drop it.
+                    last_status = first;
                 }
             }
-
-            last_status = first
         }
+
+        // The chunk ended without an EOT meta event. Treat it as one rather than reading on into
+        // the next track.
+        messages.push(Message::EndOfTrack);
+        ticks.push(tick);
+
+        Ok((messages, ticks))
     }
 
     fn merge_tracks(
@@ -337,9 +349,87 @@ impl MidiFile {
 mod tests {
     use super::*;
 
+    use std::io::Cursor;
+
     #[test]
     fn test_message_size() {
         // Avoid increasing the size of the Message type
         assert_eq!(size_of::<Message>(), 4);
+    }
+
+    fn header(format: u16, track_count: u16) -> Vec<u8> {
+        let mut data = b"MThd   ".to_vec();
+        data.extend_from_slice(&format.to_be_bytes());
+        data.extend_from_slice(&track_count.to_be_bytes());
+        data.extend_from_slice(&96u16.to_be_bytes());
+        data
+    }
+
+    fn track(events: &[u8]) -> Vec<u8> {
+        let mut data = b"MTrk".to_vec();
+        data.extend_from_slice(&(events.len() as u32).to_be_bytes());
+        data.extend_from_slice(events);
+        data
+    }
+
+    #[test]
+    fn test_meta_event_cancels_running_status() {
+        // A meta event terminates running status, so the note-on that follows it in running status
+        // still belongs to the 0x90 that came before, not to the meta event's 0xFF.
+        let mut data = header(0, 1);
+        data.extend_from_slice(&track(&[
+            0x00, 0x90, 0x3C, 0x64, // note on, key 60 - sets the running status
+            0x00, 0xFF, 0x01, 0x01, 0x41, // text meta event "A"
+            0x00, 0x3E, 0x64, // note on, key 62, in running status
+            0x00, 0xFF, 0x2F, 0x00, // end of track
+        ]));
+
+        let midi_file = MidiFile::new(&mut Cursor::new(data)).unwrap();
+
+        let notes: Vec<(u8, u8, u8)> = midi_file
+            .messages
+            .iter()
+            .filter_map(|message| match *message {
+                Message::Normal {
+                    status,
+                    data1,
+                    data2,
+                } => Some((status, data1, data2)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(notes, vec![(0x90, 60, 100), (0x90, 62, 100)]);
+    }
+
+    #[test]
+    fn test_track_without_end_of_track_stops_at_the_chunk_end() {
+        // The first track has no EOT meta event. It must stop at its own chunk rather than reading
+        // the next MTrk header as event data.
+        let mut data = header(1, 2);
+        data.extend_from_slice(&track(&[
+            0x00, 0x90, 0x3C, 0x64, // note on, key 60 - and then nothing
+        ]));
+        data.extend_from_slice(&track(&[
+            0x00, 0x90, 0x3E, 0x64, // note on, key 62
+            0x00, 0xFF, 0x2F, 0x00, // end of track
+        ]));
+
+        let midi_file = MidiFile::new(&mut Cursor::new(data)).unwrap();
+
+        let notes: Vec<(u8, u8, u8)> = midi_file
+            .messages
+            .iter()
+            .filter_map(|message| match *message {
+                Message::Normal {
+                    status,
+                    data1,
+                    data2,
+                } => Some((status, data1, data2)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(notes, vec![(0x90, 60, 100), (0x90, 62, 100)]);
     }
 }
