@@ -19,6 +19,7 @@ use std::sync::Arc;
 use rustysynth::SoundFont;
 
 mod census;
+mod probe;
 mod render;
 mod strip;
 
@@ -31,7 +32,8 @@ fn usage() -> ExitCode {
   strip-mods <in.sf2> <out.sf2>         copy a font with pmod/imod emptied
   render <sf2> <list.txt> <out.tsv>     render each listed MIDI file, hash it
   sample <dir> <count> <out.txt>        stratified sample of a MIDI corpus
-  compare <a.tsv> <b.tsv>               report rows that differ"
+  compare <a.tsv> <b.tsv>               report rows that differ
+  probe <sf2> <patch>                   velocity response and send scale of one patch"
     );
     ExitCode::from(2)
 }
@@ -52,6 +54,7 @@ fn main() -> ExitCode {
         ),
         ("sample", 4) => render::sample(Path::new(&args[1]), &args[2], Path::new(&args[3])),
         ("compare", 3) => render::compare(Path::new(&args[1]), Path::new(&args[2])),
+        ("probe", 3) => probe::run(Path::new(&args[1]), &args[2]),
         _ => return usage(),
     };
 
