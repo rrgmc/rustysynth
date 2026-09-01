@@ -19,6 +19,7 @@ use std::sync::Arc;
 use rustysynth::SoundFont;
 
 mod census;
+mod load;
 mod probe;
 mod render;
 mod strip;
@@ -28,6 +29,7 @@ const SAMPLE_RATE: i32 = 44100;
 fn usage() -> ExitCode {
     eprintln!(
         "usage:
+  load <sf2>...                         does each font open, and what was dropped
   census <sf2>...                       modulator inventory for each font
   strip-mods <in.sf2> <out.sf2>         copy a font with pmod/imod emptied
   render <sf2> <list.txt> <out.tsv>     render each listed MIDI file, hash it
@@ -45,6 +47,7 @@ fn main() -> ExitCode {
     };
 
     let result = match (command.as_str(), args.len()) {
+        ("load", n) if n >= 2 => load::run(&args[1..]),
         ("census", n) if n >= 2 => census::run(&args[1..]),
         ("strip-mods", 3) => strip::run(Path::new(&args[1]), Path::new(&args[2])),
         ("render", 4) => render::run(
