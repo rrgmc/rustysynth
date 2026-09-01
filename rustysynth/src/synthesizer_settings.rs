@@ -93,3 +93,43 @@ impl SynthesizerSettings {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_scales_default_to_honoring_the_font() {
+        let settings = SynthesizerSettings::new(44100);
+        assert_eq!(settings.reverb_send_scale, 1_f32);
+        assert_eq!(settings.chorus_send_scale, 1_f32);
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn send_scales_are_range_checked() {
+        for value in [-1_f32, 11_f32, f32::NAN, f32::INFINITY] {
+            let mut settings = SynthesizerSettings::new(44100);
+            settings.reverb_send_scale = value;
+            assert!(
+                matches!(
+                    settings.validate(),
+                    Err(SynthesizerError::SendScaleOutOfRange(_))
+                ),
+                "reverb_send_scale {value} should have been rejected"
+            );
+
+            let mut settings = SynthesizerSettings::new(44100);
+            settings.chorus_send_scale = value;
+            assert!(matches!(
+                settings.validate(),
+                Err(SynthesizerError::SendScaleOutOfRange(_))
+            ));
+        }
+
+        let mut settings = SynthesizerSettings::new(44100);
+        settings.reverb_send_scale = 0_f32;
+        settings.chorus_send_scale = 10_f32;
+        assert!(settings.validate().is_ok());
+    }
+}

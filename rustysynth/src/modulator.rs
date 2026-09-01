@@ -229,3 +229,178 @@ impl Modulator {
         self.transform
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NONE: ModulatorSource = ModulatorSource::general(
+        ModulatorSource::NO_CONTROLLER,
+        ModulatorSource::CURVE_LINEAR,
+        false,
+        false,
+    );
+
+    fn velocity_to_attenuation(amount: i16) -> Modulator {
+        Modulator {
+            source: ModulatorSource::general(
+                ModulatorSource::NOTE_ON_VELOCITY,
+                ModulatorSource::CURVE_CONCAVE,
+                false,
+                true,
+            ),
+            destination: GeneratorType::INITIAL_ATTENUATION,
+            amount,
+            amount_source: NONE,
+            transform: 0,
+        }
+    }
+
+    fn cc_to(index: u8, destination: u16, amount: i16) -> Modulator {
+        Modulator {
+            source: ModulatorSource::cc(index, ModulatorSource::CURVE_LINEAR, false, false),
+            destination,
+            amount,
+            amount_source: NONE,
+            transform: 0,
+        }
+    }
+
+    /// The rule that makes the whole feature work: a font overrides a default
+    /// by shipping a modulator with the same source and destination, and the
+    /// amount is replaced rather than added to.
+    ///
+    /// GeneralUser GS relies on this twice over - it softens velocity to
+    /// attenuation from 960 cB to 800, and disables it outright with amount 0
+    /// in 65 regions. Were these appended instead, the two would stack to
+    /// 1760 cB and every one of those regions would be far too quiet.
+    #[test]
+    fn an_identical_modulator_replaces_rather_than_adds() {
+        let mut resolved = vec![velocity_to_attenuation(960)];
+
+        Modulator::merge(&mut resolved, &[velocity_to_attenuation(800)]);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].get_amount(), 800);
+
+        // Amount 0 disables the default entirely, and has to be honored as an
+        // override rather than skipped as a no-op.
+        Modulator::merge(&mut resolved, &[velocity_to_attenuation(0)]);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].get_amount(), 0);
+    }
+
+    #[test]
+    fn a_different_destination_is_appended() {
+        let mut resolved = vec![velocity_to_attenuation(960)];
+
+        Modulator::merge(
+            &mut resolved,
+            &[cc_to(91, GeneratorType::REVERB_EFFECTS_SEND, 350)],
+        );
+
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[1].get_amount(), 350);
+    }
+
+    /// The rule applies within one list as well as between zones, so a zone
+    /// that names the same modulator twice keeps the later one.
+    #[test]
+    fn later_wins_within_a_single_list() {
+        let mut resolved: Vec<Modulator> = Vec::new();
+
+        Modulator::merge(
+            &mut resolved,
+            &[velocity_to_attenuation(500), velocity_to_attenuation(700)],
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].get_amount(), 700);
+    }
+
+    #[test]
+    fn unsupported_modulators_are_dropped_at_merge_time() {
+        let mut linked = velocity_to_attenuation(960);
+        linked.destination |= 0x8000;
+
+        let mut linked_source = velocity_to_attenuation(960);
+        linked_source.source = ModulatorSource::general(
+            ModulatorSource::LINK,
+            ModulatorSource::CURVE_LINEAR,
+            false,
+            false,
+        );
+
+        // The absolute-value transform breaks the identity that lets preset and
+        // instrument amounts be summed at voice start.
+        let mut transformed = velocity_to_attenuation(960);
+        transformed.transform = 2;
+
+        // Sample addressing decides which audio plays, not how it sounds.
+        let sample_address = cc_to(74, GeneratorType::START_ADDRESS_OFFSET, 100);
+        let sample_id = cc_to(74, GeneratorType::SAMPLE_ID, 1);
+        let exclusive = cc_to(74, GeneratorType::EXCLUSIVE_CLASS, 1);
+
+        // Bank select carries a parameter number, not a continuous value.
+        let bank_select = cc_to(0, GeneratorType::INITIAL_ATTENUATION, 100);
+        let rpn = cc_to(101, GeneratorType::INITIAL_ATTENUATION, 100);
+
+        let mut out_of_range = velocity_to_attenuation(960);
+        out_of_range.destination = GeneratorType::COUNT as u16 + 5;
+
+        let rejected = [
+            linked,
+            linked_source,
+            transformed,
+            sample_address,
+            sample_id,
+            exclusive,
+            bank_select,
+            rpn,
+            out_of_range,
+        ];
+
+        for modulator in rejected.iter() {
+            assert!(
+                !modulator.is_supported(),
+                "should have been rejected: {modulator:?}"
+            );
+        }
+
+        let mut resolved: Vec<Modulator> = Vec::new();
+        Modulator::merge(&mut resolved, &rejected);
+        assert!(resolved.is_empty());
+
+        // A plain, legal one still gets through.
+        assert!(velocity_to_attenuation(960).is_supported());
+        assert!(cc_to(91, GeneratorType::REVERB_EFFECTS_SEND, 350).is_supported());
+    }
+
+    #[test]
+    fn only_velocity_and_key_sourced_modulators_are_static() {
+        assert!(velocity_to_attenuation(960).is_static());
+        assert!(!cc_to(7, GeneratorType::INITIAL_ATTENUATION, 960).is_static());
+
+        // A static source with a dynamic amount source is dynamic overall.
+        let mut mixed = velocity_to_attenuation(960);
+        mixed.amount_source = ModulatorSource::cc(7, ModulatorSource::CURVE_LINEAR, false, false);
+        assert!(!mixed.is_static());
+    }
+
+    #[test]
+    fn a_modulator_list_of_only_a_terminator_is_legal_and_empty() {
+        let bytes = [0_u8; 10];
+        let modulators = Modulator::read_from_chunk(&mut &bytes[..], 10).unwrap();
+        assert!(modulators.is_empty());
+
+        // A size that is not a whole number of records is not.
+        let bytes = [0_u8; 15];
+        assert!(matches!(
+            Modulator::read_from_chunk(&mut &bytes[..], 15),
+            Err(SoundFontError::InvalidModulatorList)
+        ));
+        assert!(matches!(
+            Modulator::read_from_chunk(&mut &bytes[..], 0),
+            Err(SoundFontError::InvalidModulatorList)
+        ));
+    }
+}
