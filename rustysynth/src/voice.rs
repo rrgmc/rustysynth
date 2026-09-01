@@ -251,6 +251,25 @@ impl Voice {
         SoundFontMath::clamp(centibels, 0_f32, 1440_f32)
     }
 
+    /// Clamps the modulation-LFO tremolo depth.
+    ///
+    /// Unclamped this is an exponent: the gain is `10^(0.05 * 0.1 * value)`,
+    /// so a modulator driving it to 12000 cB asks for 1200 dB and overflows to
+    /// infinity, which poisons the effect buses exactly as a NaN would. No
+    /// font in the test set targets this generator at all, which is precisely
+    /// why it needs a bound rather than an assumption.
+    fn clamp_tremolo(centibels: f32) -> f32 {
+        SoundFontMath::clamp(centibels, -960_f32, 960_f32)
+    }
+
+    /// Clamps a pitch modulation depth to ten octaves either way.
+    ///
+    /// Pitch feeds the oscillator's sample stepping, and this crate has a
+    /// history of out-of-range values reaching sample addressing.
+    fn clamp_pitch(cents: f32) -> f32 {
+        SoundFontMath::clamp(cents, -12000_f32, 12000_f32)
+    }
+
     /// Clamps the modulator contribution to pan to the SF2 generator range.
     ///
     /// A font that writes the spec's own default pan modulator amount of 1000
@@ -350,7 +369,9 @@ impl Voice {
         // The test used to be a bare `> 0.05`, which silently ignored every
         // negative modLfoToVolume. Comparing the magnitude is what the
         // generator actually means.
-        self.dynamic_volume = (0.1_f32 * self.value(GeneratorType::MODULATION_LFO_TO_VOLUME)).abs()
+        self.dynamic_volume = (0.1_f32
+            * Voice::clamp_tremolo(self.value(GeneratorType::MODULATION_LFO_TO_VOLUME)))
+        .abs()
             > 0.05_f32
             || self.has_dynamic_destination(GeneratorType::MODULATION_LFO_TO_VOLUME);
 
@@ -411,13 +432,14 @@ impl Voice {
 
         // CC1 and channel pressure reach vibrato depth as modulators now,
         // which is where the old 0.01 * get_modulation() term went.
-        let vib_pitch_change =
-            0.01_f32 * self.value(GeneratorType::VIBRATO_LFO_TO_PITCH) * self.vib_lfo.get_value();
+        let vib_pitch_change = 0.01_f32
+            * Voice::clamp_pitch(self.value(GeneratorType::VIBRATO_LFO_TO_PITCH))
+            * self.vib_lfo.get_value();
         let mod_pitch_change = 0.01_f32
-            * self.value(GeneratorType::MODULATION_LFO_TO_PITCH)
+            * Voice::clamp_pitch(self.value(GeneratorType::MODULATION_LFO_TO_PITCH))
             * self.mod_lfo.get_value()
             + 0.01_f32
-                * self.value(GeneratorType::MODULATION_ENVELOPE_TO_PITCH)
+                * Voice::clamp_pitch(self.value(GeneratorType::MODULATION_ENVELOPE_TO_PITCH))
                 * self.mod_env.get_value();
         let channel_pitch_change = channel_info.get_tune() + channel_info.get_pitch_bend();
         let pitch = self.key as f32 + vib_pitch_change + mod_pitch_change + channel_pitch_change;
@@ -477,7 +499,7 @@ impl Voice {
             * self.vol_env.get_value();
         if self.dynamic_volume {
             let decibels = 0.1_f32
-                * self.value(GeneratorType::MODULATION_LFO_TO_VOLUME)
+                * Voice::clamp_tremolo(self.value(GeneratorType::MODULATION_LFO_TO_VOLUME))
                 * self.mod_lfo.get_value();
             mix_gain *= SoundFontMath::decibels_to_linear(decibels);
         }
