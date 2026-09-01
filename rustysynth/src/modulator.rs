@@ -142,6 +142,33 @@ impl Modulator {
             && self.amount_source == other.amount_source
     }
 
+    /// Applies the SF2 2.04 section 9.5.4 merge rule to a modulator list.
+    ///
+    /// A modulator identical to one already present *replaces* it, taking its
+    /// amount with it; anything else is appended. Unlike generators, which the
+    /// preset layer adds as offsets, an identical modulator is an override -
+    /// which is how GeneralUser GS softens the velocity curve from 960 cB to
+    /// 800, and how 65 of its regions disable it outright with amount 0.
+    ///
+    /// The rule applies within a single zone's list as well as between zones,
+    /// so later always wins. Unsupported modulators are dropped here rather
+    /// than at note-on.
+    pub(crate) fn merge(target: &mut Vec<Modulator>, incoming: &[Modulator]) {
+        for modulator in incoming.iter() {
+            if !modulator.is_supported() {
+                continue;
+            }
+
+            match target
+                .iter_mut()
+                .find(|existing| existing.is_identical(modulator))
+            {
+                Some(existing) => *existing = *modulator,
+                None => target.push(*modulator),
+            }
+        }
+    }
+
     /// True when neither source can change while the voice sounds, so the
     /// modulator only has to be evaluated at note-on.
     pub(crate) fn is_static(&self) -> bool {

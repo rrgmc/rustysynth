@@ -5,6 +5,7 @@ mod binary_reader;
 mod four_cc;
 mod read_counter;
 
+mod default_modulators;
 mod generator;
 mod generator_type;
 mod instrument;

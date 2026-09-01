@@ -4,6 +4,7 @@ use crate::error::SoundFontError;
 use crate::generator::Generator;
 use crate::generator_type::GeneratorType;
 use crate::instrument::Instrument;
+use crate::modulator::Modulator;
 use crate::soundfont_math::SoundFontMath;
 use crate::zone::Zone;
 
@@ -22,6 +23,11 @@ fn set_parameter(gs: &mut [i16; GeneratorType::COUNT], generator: &Generator) {
 #[non_exhaustive]
 pub struct PresetRegion {
     pub(crate) gs: [i16; GeneratorType::COUNT],
+    /// Preset modulators, merged across this region's zones. Unlike an
+    /// instrument region there are no defaults to merge over: the defaults
+    /// belong to the instrument layer, and adding them again here would apply
+    /// every one of them twice.
+    pub(crate) modulators: Vec<Modulator>,
     pub(crate) instrument: usize,
 }
 
@@ -44,6 +50,10 @@ impl PresetRegion {
             set_parameter(&mut gs, generator);
         }
 
+        let mut modulators: Vec<Modulator> = Vec::new();
+        Modulator::merge(&mut modulators, &global.modulators);
+        Modulator::merge(&mut modulators, &local.modulators);
+
         let instrument_id = gs[GeneratorType::INSTRUMENT as usize] as usize;
         if instrument_id >= samples.len() {
             return Err(SoundFontError::InvalidInstrumentId {
@@ -54,6 +64,7 @@ impl PresetRegion {
 
         Ok(Self {
             gs,
+            modulators,
             instrument: instrument_id,
         })
     }
@@ -112,6 +123,15 @@ impl PresetRegion {
         let contains_velocity = self.get_velocity_range_start() <= velocity
             && velocity <= self.get_velocity_range_end();
         contains_key && contains_velocity
+    }
+
+    /// Gets the modulators of the region.
+    ///
+    /// These are the modulators the SoundFont itself carries. The SF2 default
+    /// modulators that also apply are not included, since a caller inspecting
+    /// a font should see what the font says.
+    pub fn get_modulators(&self) -> &[Modulator] {
+        &self.modulators[..]
     }
 
     pub fn get_modulation_lfo_to_pitch(&self) -> i32 {

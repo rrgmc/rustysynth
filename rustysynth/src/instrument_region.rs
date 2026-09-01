@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
+use crate::default_modulators::DEFAULT_MODULATORS;
 use crate::error::SoundFontError;
 use crate::generator::Generator;
 use crate::generator_type::GeneratorType;
 use crate::loop_mode::LoopMode;
+use crate::modulator::Modulator;
 use crate::sample_header::SampleHeader;
 use crate::soundfont_math::SoundFontMath;
 use crate::zone::Zone;
@@ -23,6 +25,13 @@ fn set_parameter(gs: &mut [i16; GeneratorType::COUNT], generator: &Generator) {
 #[non_exhaustive]
 pub struct InstrumentRegion {
     pub(crate) gs: [i16; GeneratorType::COUNT],
+    /// The modulators this region's zones actually carry, which is what
+    /// `get_modulators` exposes.
+    pub(crate) modulators: Vec<Modulator>,
+    /// The same list merged over the SF2 defaults, which is what a voice uses.
+    /// Kept separate so that the deliberately non-spec send amounts are not
+    /// presented as if the font had asked for them.
+    pub(crate) resolved_modulators: Vec<Modulator>,
     pub(crate) sample_start: i32,
     pub(crate) sample_end: i32,
     pub(crate) sample_start_loop: i32,
@@ -68,6 +77,14 @@ impl InstrumentRegion {
             set_parameter(&mut gs, generator);
         }
 
+        let mut modulators: Vec<Modulator> = Vec::new();
+        Modulator::merge(&mut modulators, &global.modulators);
+        Modulator::merge(&mut modulators, &local.modulators);
+
+        let mut resolved_modulators = DEFAULT_MODULATORS.to_vec();
+        Modulator::merge(&mut resolved_modulators, &global.modulators);
+        Modulator::merge(&mut resolved_modulators, &local.modulators);
+
         let sample_id = gs[GeneratorType::SAMPLE_ID as usize] as usize;
         if sample_id >= samples.len() {
             return Err(SoundFontError::InvalidSampleId {
@@ -79,6 +96,8 @@ impl InstrumentRegion {
 
         Ok(Self {
             gs,
+            modulators,
+            resolved_modulators,
             sample_start: sample.start,
             sample_end: sample.end,
             sample_start_loop: sample.start_loop,
@@ -143,6 +162,15 @@ impl InstrumentRegion {
         let contains_velocity = self.get_velocity_range_start() <= velocity
             && velocity <= self.get_velocity_range_end();
         contains_key && contains_velocity
+    }
+
+    /// Gets the modulators of the region.
+    ///
+    /// These are the modulators the SoundFont itself carries. The SF2 default
+    /// modulators that also apply are not included, since a caller inspecting
+    /// a font should see what the font says.
+    pub fn get_modulators(&self) -> &[Modulator] {
+        &self.modulators[..]
     }
 
     pub fn get_sample_start(&self) -> i32 {

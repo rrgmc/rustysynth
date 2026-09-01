@@ -141,6 +141,33 @@ impl ModulatorSource {
         )
     }
 
+    /// The controller number: a MIDI CC when `is_midi_controller`, otherwise
+    /// an entry in the SF2 general controller palette.
+    pub fn get_index(&self) -> u8 {
+        self.index
+    }
+
+    /// True when `get_index` names a MIDI continuous controller.
+    pub fn is_midi_controller(&self) -> bool {
+        self.is_cc
+    }
+
+    /// True when the source runs from maximum to minimum.
+    pub fn is_negative_direction(&self) -> bool {
+        self.is_negative
+    }
+
+    /// True when the source spans -1..1 rather than 0..1.
+    pub fn is_bipolar_polarity(&self) -> bool {
+        self.is_bipolar
+    }
+
+    /// The curve applied to the controller: 0 linear, 1 concave, 2 convex,
+    /// 3 switch.
+    pub fn get_curve_type(&self) -> u8 {
+        self.curve
+    }
+
     /// The controller's current value, normalized to 0..1.
     ///
     /// Normalization deliberately uses RustySynth's own ranges - 127 for 7-bit
