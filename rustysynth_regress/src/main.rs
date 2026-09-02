@@ -38,7 +38,7 @@ fn usage() -> ExitCode {
   compare <a.tsv> <b.tsv>               report rows that differ
   probe <sf2> <patch>                   velocity response and send scale of one patch
   diagnose stems <sf2> <mid> <outdir>   render each channel on its own, as WAV
-  diagnose notes <sf2> <mid> <out.tsv>  what every note-on resolved to, and its tuning error
+  diagnose notes <sf2> <mid> <out.tsv>  what every note-on resolved to, and the tuning the font asks for
   diagnose voices <sf2> <mid>           how much polyphony the file actually wants"
     );
     ExitCode::from(2)

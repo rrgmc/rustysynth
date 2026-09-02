@@ -8,8 +8,9 @@
 //!   part out in one pass rather than by elimination.
 //! - `notes` reports what every note-on actually resolved to - preset,
 //!   instrument, sample, root key, the three tuning generators - and how far
-//!   off equal temperament the result lands. That turns "sounds out of tune"
-//!   into cents.
+//!   off equal temperament the font asks that region to land. It reads the
+//!   font, not the audio, so it narrows "sounds out of tune" to a channel and
+//!   a sample without ever showing the synthesizer at fault.
 //! - `voices` reports how much polyphony the file really wants, because a
 //!   layered patch starts several voices per note and a stolen layer is easy to
 //!   mistake for a tuning fault.
@@ -245,27 +246,26 @@ struct Resolved {
     /// The `fineTune` generators alone, preset plus instrument.
     fine_tune: i32,
     /// The sample header's own correction, kept apart from `fine_tune` - see
-    /// `cents_error` for why.
+    /// `cents_offset` for why.
     pitch_correction: i32,
     sample_rate: i32,
     /// Semitones the oscillator shifts the sample by, relative to its root key.
     pitch_change: f64,
-    /// How far the sounding pitch lands from the key that was asked for,
-    /// **excluding** the sample's pitch correction.
+    /// How far the font asks this region to land from equal temperament for the
+    /// key played.
     ///
-    /// The correction has to come out, because it is not an error - it is the
-    /// cancellation of one. SF2 8.1.4 defines it as the amount needed to undo
-    /// the sample's own recording error, so a region whose only deviation is
-    /// its correction is in tune, not out of it. GeneralUser-GS's sitar samples
-    /// measure 61 to 68 cents sharp of their root key and carry a correction of
-    /// -61; counting that as error made the sitar the worst-looking channel in
-    /// the file when it is one of the better-tuned ones.
+    /// Intent, not fault: it comes from the same generators the synthesizer
+    /// reads, so it cannot disagree with what plays. Large values are normal -
+    /// GeneralUser-GS's Music Box is octave-doubled by `coarseTune` 12 and
+    /// reads 601 cents. Catching a synthesis fault needs a rendered note
+    /// measured against the notated key, which this is not.
     ///
-    /// Meaningless on a percussion channel, where the font transposes a sample
-    /// freely to reach the sound the key stands for and the key is not a pitch
-    /// at all. The summary leaves those channels out of the average for that
-    /// reason.
-    cents_error: f64,
+    /// `pitch_correction` is excluded because SF2 8.1.4 defines it as undoing
+    /// the sample's own recording error. `coarseTune` and `fineTune` carry no
+    /// such guarantee and stay in - SC-55 v3.7 tunes entirely by `fineTune`.
+    ///
+    /// Meaningless on percussion, where a key names a sound, not a pitch.
+    cents_offset: f64,
 }
 
 /// Mirrors the preset lookup in `Synthesizer::note_on`, including the fallback
@@ -343,7 +343,7 @@ fn resolve(
                 pitch_correction,
                 sample_rate: sample.get_sample_rate(),
                 pitch_change,
-                cents_error: (root_key as f64 + pitch_change - key as f64) * 100_f64
+                cents_offset: (root_key as f64 + pitch_change - key as f64) * 100_f64
                     - pitch_correction as f64,
             });
         }
@@ -360,7 +360,7 @@ pub fn notes(sound_font_path: &Path, midi_path: &Path, output: &Path) -> Result<
     let mut writer = BufWriter::new(file);
     writeln!(
         writer,
-        "time\tchannel\tkey\tvelocity\tbank\tpatch\tpreset\tinstrument\tsample\troot_key\tscale_tuning\tcoarse_tune\tfine_tune\tpitch_correction\tsample_rate\tpitch_change\tcents_error"
+        "time\tchannel\tkey\tvelocity\tbank\tpatch\tpreset\tinstrument\tsample\troot_key\tscale_tuning\tcoarse_tune\tfine_tune\tpitch_correction\tsample_rate\tpitch_change\tcents_offset"
     )
     .map_err(|e| e.to_string())?;
 
@@ -373,7 +373,7 @@ pub fn notes(sound_font_path: &Path, midi_path: &Path, output: &Path) -> Result<
 
     let mut rows = 0_usize;
     let mut silent = 0_usize;
-    let mut worst: BTreeMap<i32, (f64, String)> = BTreeMap::new();
+    let mut largest: BTreeMap<i32, (f64, String)> = BTreeMap::new();
     let mut per_channel: BTreeMap<i32, (usize, f64)> = BTreeMap::new();
 
     for event in midi_file.get_events() {
@@ -423,26 +423,26 @@ pub fn notes(sound_font_path: &Path, midi_path: &Path, output: &Path) -> Result<
                         row.pitch_correction,
                         row.sample_rate,
                         row.pitch_change,
-                        row.cents_error,
+                        row.cents_offset,
                     )
                     .map_err(|e| e.to_string())?;
                     rows += 1;
 
                     let entry = per_channel.entry(channel).or_insert((0, 0_f64));
                     entry.0 += 1;
-                    entry.1 += row.cents_error.abs();
+                    entry.1 += row.cents_offset.abs();
 
-                    let seen = worst.entry(channel).or_insert((0_f64, String::new()));
-                    if row.cents_error.abs() > seen.0 {
+                    let seen = largest.entry(channel).or_insert((0_f64, String::new()));
+                    if row.cents_offset.abs() > seen.0 {
                         *seen = (
-                            row.cents_error.abs(),
+                            row.cents_offset.abs(),
                             format!(
                                 "key {key} -> '{}' / '{}' root {} scale {} ({:+.1} cents)",
                                 row.instrument,
                                 row.sample,
                                 row.root_key,
                                 row.scale_tuning,
-                                row.cents_error
+                                row.cents_offset
                             ),
                         );
                     }
@@ -465,20 +465,21 @@ pub fn notes(sound_font_path: &Path, midi_path: &Path, output: &Path) -> Result<
     }
 
     println!(
-        "\n  mean absolute tuning error, and the worst note, per channel.
-  The sample's own pitch correction is excluded - it cancels a recording
-  error rather than causing one. Percussion is reported but not judged: a
-  drum key names a sound, not a pitch, so the font transposes freely."
+        "\n  mean absolute offset from equal temperament, and the largest, per
+  channel. This is what the font asks for, not a fault - it is read from the
+  same generators the synthesizer uses, so a deliberately transposed layer
+  reads large. The sample's own pitch correction is excluded; percussion is
+  reported but not averaged in."
     );
     for (channel, (count, total)) in &per_channel {
         let mean = total / *count as f64;
-        let detail = worst
+        let detail = largest
             .get(channel)
             .map(|(_, text)| text.as_str())
             .unwrap_or("");
         let note = if *channel == 9 { "  (percussion)" } else { "" };
         println!(
-            "    ch{channel:02}  {count:5} voices  mean {mean:6.1} cents{note}  worst: {detail}"
+            "    ch{channel:02}  {count:5} voices  mean {mean:6.1} cents{note}  largest: {detail}"
         );
     }
 
