@@ -382,7 +382,7 @@ impl Voice {
         RegionEx::start_modulation_envelope(&mut self.mod_env, region, key, velocity);
         RegionEx::start_vibrato(&mut self.vib_lfo, region, key, velocity);
         RegionEx::start_modulation(&mut self.mod_lfo, region, key, velocity);
-        RegionEx::start_oscillator(&mut self.oscillator, region);
+        RegionEx::start_oscillator(&mut self.oscillator, region, key);
         self.filter.clear_buffer();
 
         self.smoothed_cutoff = self.base_cutoff();
@@ -441,7 +441,13 @@ impl Voice {
             + 0.01_f32
                 * Voice::clamp_pitch(self.value(GeneratorType::MODULATION_ENVELOPE_TO_PITCH))
                 * self.mod_env.get_value();
-        let channel_pitch_change = channel_info.get_tune() + channel_info.get_pitch_bend();
+        // These three are real semitones, and the oscillator adds them as such
+        // rather than through scaleTuning - which matters most for the per-key
+        // drum tune, since a drum region is exactly where a font is likely to
+        // set scaleTuning to zero and swallow it.
+        let channel_pitch_change = channel_info.get_tune()
+            + channel_info.get_pitch_bend()
+            + channel_info.get_key_tune(self.key);
         let pitch = self.key as f32 + vib_pitch_change + mod_pitch_change + channel_pitch_change;
         if !self.oscillator.process(data, &mut self.block[..], pitch) {
             return false;

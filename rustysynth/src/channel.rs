@@ -30,9 +30,18 @@ pub(crate) struct Channel {
     poly_pressure: [u8; 128],
 
     rpn: i16,
+    nrpn: i16,
     pitch_bend_range: i16,
     coarse_tune: i16,
     fine_tune: i16,
+
+    /// Per-key coarse tune in semitones, from the Roland GS NRPN 18H "Drum
+    /// Instrument Pitch Coarse". Zero for every key until a file asks.
+    ///
+    /// A drum part needs this because one key is one instrument: retuning a
+    /// tom without moving the snare beside it is not something a channel-wide
+    /// tune can express, which is why GS gave the parameter a key argument.
+    key_tune: [i8; 128],
 
     pitch_bend: f32,
 
@@ -62,9 +71,11 @@ impl Channel {
             channel_pressure: 0,
             poly_pressure: [0; 128],
             rpn: 0,
+            nrpn: 0,
             pitch_bend_range: 0,
             coarse_tune: 0,
             fine_tune: 0,
+            key_tune: [0; 128],
             pitch_bend: 0_f32,
             last_data_type: DataType::None,
         };
@@ -99,9 +110,11 @@ impl Channel {
         self.poly_pressure = [0; 128];
 
         self.rpn = -1;
+        self.nrpn = -1;
         self.pitch_bend_range = 2 << 7;
         self.coarse_tune = 0;
         self.fine_tune = 8192;
+        self.key_tune = [0; 128];
 
         self.pitch_bend = 0_f32;
     }
@@ -112,8 +125,13 @@ impl Channel {
         self.hold_pedal = false;
 
         self.rpn = -1;
+        self.nrpn = -1;
 
         self.pitch_bend = 0_f32;
+
+        // `key_tune` deliberately survives, for the reason volume and pan do:
+        // it is a part parameter rather than a controller, and GS clears it on
+        // a GS reset, not on CC 121.
 
         // Mirror the above into the raw controller state, and reset the
         // pressures with it. Volume, pan and the effect sends are deliberately
@@ -217,15 +235,22 @@ impl Channel {
         self.last_data_type = DataType::Rpn;
     }
 
-    pub(crate) fn set_nrpn_coarse(&mut self, _value: i32) {
+    pub(crate) fn set_nrpn_coarse(&mut self, value: i32) {
+        self.nrpn = (self.nrpn & 0x7F) | (value << 7) as i16;
         self.last_data_type = DataType::Nrpn;
     }
 
-    pub(crate) fn set_nrpn_fine(&mut self, _value: i32) {
+    pub(crate) fn set_nrpn_fine(&mut self, value: i32) {
+        self.nrpn = (((self.nrpn as i32) & 0xFF80) | value) as i16;
         self.last_data_type = DataType::Nrpn;
     }
 
     pub(crate) fn data_entry_coarse(&mut self, value: i32) {
+        if self.last_data_type == DataType::Nrpn {
+            self.nrpn_data_entry_coarse(value);
+            return;
+        }
+
         if self.last_data_type != DataType::Rpn {
             return;
         }
@@ -236,6 +261,28 @@ impl Channel {
             self.fine_tune = (self.fine_tune & 0x7F) | (value << 7) as i16;
         } else if self.rpn == 2 {
             self.coarse_tune = (value - 64) as i16;
+        }
+    }
+
+    /// The one NRPN this synthesizer acts on: Roland GS 18H, drum instrument
+    /// pitch coarse.
+    ///
+    /// The parameter's LSB is a key number rather than part of the parameter
+    /// id, and the value is an offset around 40H. Everything else GS defines
+    /// here - vibrato rate, TVF cutoff, envelope times, per-key level and pan -
+    /// is still accepted and dropped, which is what the old blanket discard
+    /// did to this one too. It cost the corpus real notes: the karaoke file
+    /// this came from retunes a kick, a snare, a tom and two agogo bells, and
+    /// with the agogos nine semitones out that is 915 of its 1982 percussion
+    /// notes at the wrong pitch.
+    fn nrpn_data_entry_coarse(&mut self, value: i32) {
+        const DRUM_PITCH_COARSE: i32 = 0x18;
+
+        let parameter = ((self.nrpn as i32) >> 7) & 0x7F;
+        let key = (self.nrpn as i32) & 0x7F;
+
+        if parameter == DRUM_PITCH_COARSE {
+            self.key_tune[key as usize] = (value - 64).clamp(-64, 63) as i8;
         }
     }
 
@@ -330,6 +377,20 @@ impl Channel {
 
     pub(crate) fn get_tune(&self) -> f32 {
         self.coarse_tune as f32 + (1_f32 / 8192_f32) * (self.fine_tune - 8192) as f32
+    }
+
+    /// Semitones this key alone is retuned by, from GS NRPN 18H.
+    ///
+    /// Gated on the channel currently holding a drum kit, because that is what
+    /// the parameter means. On a melodic part the same key numbers are pitches
+    /// that the font already tunes, so honoring a stray write there would
+    /// transpose real notes for no reason.
+    pub(crate) fn get_key_tune(&self, key: i32) -> f32 {
+        if self.bank_number < 128 || !(0..128).contains(&key) {
+            return 0_f32;
+        }
+
+        self.key_tune[key as usize] as f32
     }
 
     pub(crate) fn get_pitch_bend(&self) -> f32 {
@@ -461,5 +522,74 @@ mod tests {
         channel.set_chorus_send(255);
         assert!(channel.get_reverb_send() <= 1_f32);
         assert!(channel.get_chorus_send() <= 1_f32);
+    }
+
+    /// Selects GS NRPN 18H for `key` and writes `value`, the way a GS file
+    /// does: parameter MSB, parameter LSB, then data entry.
+    fn drum_pitch(channel: &mut Channel, key: i32, value: i32) {
+        channel.set_nrpn_coarse(0x18);
+        channel.set_nrpn_fine(key);
+        channel.data_entry_coarse(value);
+    }
+
+    #[test]
+    fn a_drum_key_can_be_retuned_on_its_own() {
+        let mut channel = Channel::new(true);
+
+        drum_pitch(&mut channel, 40, 60);
+        drum_pitch(&mut channel, 47, 66);
+
+        assert_eq!(channel.get_key_tune(40), -4_f32);
+        assert_eq!(channel.get_key_tune(47), 2_f32);
+
+        // The point of the parameter is that it moves one key and not the
+        // neighbours, and that it does not become a channel-wide tune.
+        assert_eq!(channel.get_key_tune(41), 0_f32);
+        assert_eq!(channel.get_tune(), 0_f32);
+    }
+
+    #[test]
+    fn a_melodic_channel_ignores_the_drum_pitch_parameter() {
+        // The same key numbers are real pitches on a melodic part, so a stray
+        // write must not transpose them.
+        let mut channel = Channel::new(false);
+
+        drum_pitch(&mut channel, 40, 60);
+
+        assert_eq!(channel.get_key_tune(40), 0_f32);
+    }
+
+    #[test]
+    fn selecting_an_nrpn_still_does_not_leak_into_the_rpn_parameters() {
+        // The reason every NRPN value used to be discarded: the data entry
+        // that follows one must not be read as pitch bend sensitivity. That
+        // has to keep holding now that one NRPN is acted on, and an RPN
+        // selected afterwards has to work again - which is the exact sequence
+        // the karaoke corpus sends.
+        let mut channel = Channel::new(false);
+
+        drum_pitch(&mut channel, 40, 127);
+        assert_eq!(channel.get_pitch_bend_range(), 2_f32);
+        assert_eq!(channel.get_tune(), 0_f32);
+
+        channel.set_rpn_coarse(0);
+        channel.set_rpn_fine(0);
+        channel.data_entry_coarse(12);
+        assert_eq!(channel.get_pitch_bend_range(), 12_f32);
+    }
+
+    #[test]
+    fn a_retuned_drum_key_survives_reset_all_controllers_but_not_reset() {
+        // It is a part parameter rather than a controller, which is the same
+        // reason volume and pan survive CC 121.
+        let mut channel = Channel::new(true);
+
+        drum_pitch(&mut channel, 40, 60);
+
+        channel.reset_all_controllers();
+        assert_eq!(channel.get_key_tune(40), -4_f32);
+
+        channel.reset();
+        assert_eq!(channel.get_key_tune(40), 0_f32);
     }
 }

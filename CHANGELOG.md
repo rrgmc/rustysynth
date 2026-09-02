@@ -5,6 +5,35 @@
 - Fixed an issue where a track without an end-of-track meta event was parsed past the end of its
   own chunk.
 
+**`scaleTuning` no longer scales pitch bend, vibrato or channel tune.** The oscillator applied it
+to everything modulating the note, not just the key. SF2 2.04 section 8.1.2 defines the generator as
+the degree to which *MIDI key number* influences pitch, so the interval from the root key is scaled
+and the modulation is added in real semitones. The case this ruins is a fixed-pitch region -
+`scaleTuning` 0, which is how a font says "every key plays this sample untransposed" - because
+scaling the modulation by zero as well made the region deaf to the pitch wheel and to vibrato
+entirely. GeneralUser GS ships eight such regions and SGM-V2.01 ships 174. A region at the default
+100 is unaffected, which is nearly all of them.
+
+This deviates from MeltySynth, which is why it was measured: of 150 files sampled from a 616,602
+file corpus and rendered through GeneralUser GS, **142 are bit-identical and 8 differ**, none newly
+failing and none producing a NaN. The eight are the files that bend a note in a region the font
+did not leave at 100.
+
+**Roland GS drum pitch (NRPN 18H) is honored.** Every NRPN value used to be discarded, which was
+right for the ones this synthesizer has no parameter for but wrong for this one: on a drum part each
+key is a separate instrument, so retuning one tom without moving the snare beside it is not
+something a channel-wide tune can express, and GS gave the parameter a key argument for that reason.
+
+The cost was measurable. One karaoke file in the corpus retunes a kick by -2 semitones, a snare by
+-4, a low-mid tom by +2 and both agogo bells by -9; ignoring that left **915 of its 1,982 percussion
+notes at the wrong pitch** for the whole song, the agogos most audibly since they are the only
+pitched percussion in the arrangement. The parameter is honored only while the channel holds a drum
+kit, because the same key numbers are real pitches on a melodic part. It survives CC 121 for the
+reason volume and pan do - it is a part parameter, not a controller.
+
+Every other NRPN is still accepted and dropped, and a data entry that follows one still cannot be
+read as pitch bend sensitivity.
+
 **A SoundFont with one bad record now loads without it, rather than not loading at all.** A karaoke
 application surveying fifteen General MIDI banks found four of them unopenable and called this the
 limitation with the widest reach: pointing a setting at a bank found on the internet had a material

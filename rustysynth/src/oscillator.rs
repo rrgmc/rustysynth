@@ -20,6 +20,7 @@ pub(crate) struct Oscillator {
     start_loop: i32,
     end_loop: i32,
     root_key: i32,
+    key: i32,
 
     tune: f32,
     pitch_change_scale: f32,
@@ -45,6 +46,7 @@ impl Oscillator {
             start_loop: 0,
             end_loop: 0,
             root_key: 0,
+            key: 0,
             tune: 0_f32,
             pitch_change_scale: 0_f32,
             sample_rate_ratio: 0_f32,
@@ -63,6 +65,7 @@ impl Oscillator {
         start_loop: i32,
         end_loop: i32,
         root_key: i32,
+        key: i32,
         coarse_tune: i32,
         fine_tune: i32,
         scale_tuning: i32,
@@ -74,6 +77,7 @@ impl Oscillator {
         self.start_loop = start_loop;
         self.end_loop = end_loop;
         self.root_key = root_key;
+        self.key = key;
 
         self.tune = coarse_tune as f32 + 0.01_f32 * fine_tune as f32;
         self.pitch_change_scale = 0.01_f32 * scale_tuning as f32;
@@ -88,10 +92,27 @@ impl Oscillator {
         }
     }
 
+    /// `pitch` is the note's key plus everything modulating it this block -
+    /// the two LFOs, the modulation envelope, the channel tune and the pitch
+    /// bend.
+    ///
+    /// Only the key-to-root interval is scaled by `scaleTuning`. SF2 2.04
+    /// 8.1.2 defines that generator as "the degree to which MIDI key number
+    /// influences pitch", which is the interval and nothing else; the
+    /// modulation is in real semitones and is added as such. Scaling it too -
+    /// which is what this did while it followed MeltySynth - makes a region at
+    /// `scaleTuning` 0 swallow pitch bend and vibrato whole, and GeneralUser-GS
+    /// ships eight such regions to SGM-V2.01's 174.
     pub(crate) fn process(&mut self, data: &[i16], block: &mut [f32], pitch: f32) -> bool {
-        let pitch_change = self.pitch_change_scale * (pitch - self.root_key as f32) + self.tune;
-        let pitch_ratio = self.sample_rate_ratio * 2_f32.powf(pitch_change / 12_f32);
+        let pitch_ratio = self.pitch_ratio(pitch);
         self.fill_block(data, block, pitch_ratio as f64)
+    }
+
+    fn pitch_ratio(&self, pitch: f32) -> f32 {
+        let interval = (self.key - self.root_key) as f32;
+        let modulation = pitch - self.key as f32;
+        let pitch_change = self.pitch_change_scale * interval + modulation + self.tune;
+        self.sample_rate_ratio * 2_f32.powf(pitch_change / 12_f32)
     }
 
     fn fill_block(&mut self, data: &[i16], block: &mut [f32], pitch_ratio: f64) -> bool {
@@ -160,5 +181,69 @@ impl Oscillator {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An oscillator playing `key` from a sample rooted at `root_key`, at the
+    /// synthesizer's own rate so `sample_rate_ratio` is 1 and the ratio reads
+    /// directly as a transposition.
+    fn oscillator(scale_tuning: i32, root_key: i32, key: i32) -> Oscillator {
+        let settings = SynthesizerSettings::new(44100);
+        let mut oscillator = Oscillator::new(&settings);
+        oscillator.start(
+            LoopMode::NoLoop,
+            44100,
+            0,
+            1000,
+            0,
+            1000,
+            root_key,
+            key,
+            0,
+            0,
+            scale_tuning,
+        );
+        oscillator
+    }
+
+    fn semitones(ratio: f32) -> f32 {
+        12_f32 * ratio.log2()
+    }
+
+    #[test]
+    fn scale_tuning_bends_the_key_interval() {
+        // What the generator is for: at 50 cents per key, an octave above the
+        // root sounds a perfect fourth above it instead.
+        let oscillator = oscillator(50, 60, 72);
+        assert!((semitones(oscillator.pitch_ratio(72_f32)) - 6_f32).abs() < 1e-4);
+    }
+
+    #[test]
+    fn scale_tuning_leaves_the_modulation_alone() {
+        // A region at scaleTuning 0 is a fixed-pitch region - every key plays
+        // the sample untransposed - but pitch bend and vibrato still have to
+        // reach it. Scaling them too made a whole class of region, including
+        // eight in GeneralUser-GS and 174 in SGM-V2.01, silently deaf to the
+        // pitch wheel.
+        let oscillator = oscillator(0, 60, 72);
+
+        assert!(semitones(oscillator.pitch_ratio(72_f32)).abs() < 1e-4);
+        assert!((semitones(oscillator.pitch_ratio(74_f32)) - 2_f32).abs() < 1e-4);
+        assert!((semitones(oscillator.pitch_ratio(71.5_f32)) + 0.5_f32).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_normal_region_is_unchanged() {
+        // scaleTuning 100 is the default and by far the common case, and there
+        // the split has to be a no-op: the interval and the modulation are
+        // both scaled by one.
+        let oscillator = oscillator(100, 60, 72);
+
+        assert!((semitones(oscillator.pitch_ratio(72_f32)) - 12_f32).abs() < 1e-4);
+        assert!((semitones(oscillator.pitch_ratio(74_f32)) - 14_f32).abs() < 1e-4);
     }
 }

@@ -103,6 +103,15 @@ instrument.gs[i]`**. Sample addressing, `sample_modes`, `exclusive_class`, and `
 *not* summed — they come from the instrument only. `RegionEx` (`region_ex.rs`) adapts a
 `RegionPair` into the start arguments for the oscillator, envelopes, and LFOs.
 
+**`scale_tuning` multiplies the key interval only.** `Oscillator::pitch_ratio` splits its `pitch`
+argument into `scale_tuning/100 × (key − root_key)` plus the modulation — the LFOs, the modulation
+envelope, the channel tune, the pitch bend and the per-key drum tune — added in real semitones.
+This is the one place the port deliberately leaves MeltySynth, which scaled the whole sum: SF2
+2.04 8.1.2 defines the generator as the influence of *key number*, and a fixed-pitch region
+(`scale_tuning` 0, which several fonts ship) went completely deaf to pitch bend and vibrato under
+the old form. `Oscillator` therefore has to be told the note's `key` at `start()` as well as
+`root_key`; both are fixed for the voice's life.
+
 ### Rendering
 
 `Synthesizer::render` (`synthesizer.rs:334`) is a pull loop that decouples the caller's buffer
@@ -144,7 +153,20 @@ modulators that reach it.
 
 Exactly 16 `Channel`s, index 9 forced to percussion (bank 128). Worth knowing: `reset()` leaves
 `reverb_send` at **40, not 0** (`channel.rs:63`), and `reset_all_controllers()` deliberately
-preserves volume, pan, and sends. NRPN data entry is accepted but ignored.
+preserves volume, pan, and sends.
+
+**One NRPN is honored, the rest are accepted and dropped.** GS 18H, drum instrument pitch coarse,
+lands in `Channel::key_tune` as a per-key semitone offset and is read at `voice.rs`'s
+`channel_pitch_change`; `get_key_tune` gates on `bank_number >= 128`, because the same key numbers
+are pitches the font already tunes on a melodic part. Everything else GS defines there - vibrato
+rate, TVF cutoff, envelope times, per-key level and pan - still sets `last_data_type` and discards
+its value, which is what keeps a data entry following an NRPN from being read as pitch bend
+sensitivity (`channel.rs`, `data_entry_coarse`).
+
+Both RPN selector bytes are needed to select a parameter: `rpn` is packed MSB-over-LSB and starts at
+-1, which reads as the null parameter 127:127, so a file sending only CC 101 = 0 selects RPN 0:127
+and its data entry is dropped. That matches hardware, where the two are independent registers that
+power up null, and diverges from FluidSynth, which zeroes both. Real GS files send both bytes.
 
 ### MIDI file playback
 
