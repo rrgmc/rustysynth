@@ -225,27 +225,37 @@ impl Channel {
         }
     }
 
+    // The parameter selectors and the data entries were the last controllers
+    // reached by a raw value. Everything else was masked above because the
+    // corpus delivers bytes with the high bit set; these were missed, and they
+    // are the ones where an unmasked byte does lasting damage. 255 into CC 6
+    // under RPN 0 made `get_pitch_bend_range` 255 semitones, and under RPN 1 it
+    // detuned the channel by nearly three semitones for the rest of the file.
+    // `(value << 7) as i16` also overflowed for anything from 256 up, which
+    // `process_midi_message` will pass through unchecked.
     pub(crate) fn set_rpn_coarse(&mut self, value: i32) {
-        self.rpn = (self.rpn & 0x7F) | (value << 7) as i16;
+        self.rpn = (self.rpn & 0x7F) | ((value & 0x7F) << 7) as i16;
         self.last_data_type = DataType::Rpn;
     }
 
     pub(crate) fn set_rpn_fine(&mut self, value: i32) {
-        self.rpn = (((self.rpn as i32) & 0xFF80) | value) as i16;
+        self.rpn = (((self.rpn as i32) & 0xFF80) | (value & 0x7F)) as i16;
         self.last_data_type = DataType::Rpn;
     }
 
     pub(crate) fn set_nrpn_coarse(&mut self, value: i32) {
-        self.nrpn = (self.nrpn & 0x7F) | (value << 7) as i16;
+        self.nrpn = (self.nrpn & 0x7F) | ((value & 0x7F) << 7) as i16;
         self.last_data_type = DataType::Nrpn;
     }
 
     pub(crate) fn set_nrpn_fine(&mut self, value: i32) {
-        self.nrpn = (((self.nrpn as i32) & 0xFF80) | value) as i16;
+        self.nrpn = (((self.nrpn as i32) & 0xFF80) | (value & 0x7F)) as i16;
         self.last_data_type = DataType::Nrpn;
     }
 
     pub(crate) fn data_entry_coarse(&mut self, value: i32) {
+        let value = value & 0x7F;
+
         if self.last_data_type == DataType::Nrpn {
             self.nrpn_data_entry_coarse(value);
             return;
@@ -287,6 +297,8 @@ impl Channel {
     }
 
     pub(crate) fn data_entry_fine(&mut self, value: i32) {
+        let value = value & 0x7F;
+
         if self.last_data_type != DataType::Rpn {
             return;
         }
@@ -576,6 +588,32 @@ mod tests {
         channel.set_rpn_fine(0);
         channel.data_entry_coarse(12);
         assert_eq!(channel.get_pitch_bend_range(), 12_f32);
+    }
+
+    #[test]
+    fn the_parameter_selectors_and_data_entries_are_masked_too() {
+        // These were the last controllers reached by a raw value, and the ones
+        // where an out-of-range byte does lasting damage: an unmasked 255 into
+        // CC 6 under RPN 0 asked for a 255 semitone bend range, and under RPN 1
+        // detuned the channel for the rest of the file.
+        let mut channel = Channel::new(false);
+
+        channel.set_rpn_coarse(0);
+        channel.set_rpn_fine(0);
+        channel.data_entry_coarse(255);
+        assert!(channel.get_pitch_bend_range() <= 127_f32);
+
+        channel.set_rpn_coarse(0);
+        channel.set_rpn_fine(1);
+        channel.data_entry_coarse(255);
+        channel.data_entry_fine(255);
+        assert!(channel.get_tune().abs() <= 1_f32);
+
+        // And a selector out of range must not overflow the packed register.
+        channel.set_rpn_coarse(511);
+        channel.set_rpn_fine(511);
+        channel.data_entry_coarse(64);
+        assert!(channel.get_pitch_bend_range() <= 127_f32);
     }
 
     #[test]

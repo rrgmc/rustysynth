@@ -12,6 +12,11 @@
   an error. It also left the running status at `0xF1`..`0xFE`, so each following running-status
   event decoded as command `0xF0` and was discarded. `0xF1`, `0xF2` and `0xF3` now consume their
   real data bytes and the rest consume none.
+- **Data entry and the RPN/NRPN selectors are masked to seven bits.** They were the last
+  controllers reached by a raw value, and the ones where an out-of-range byte does lasting damage:
+  255 into CC 6 under RPN 0 asked for a 255 semitone pitch bend range, and under RPN 1 detuned the
+  channel by nearly three semitones for the rest of the file. `(value << 7)` also overflowed the
+  packed selector for anything from 256 up, which `process_midi_message` passes through unchecked.
 
 **`scaleTuning` no longer scales pitch bend, vibrato or channel tune.** The oscillator applied it
 to everything modulating the note, not just the key. SF2 2.04 section 8.1.2 defines the generator as
