@@ -5,6 +5,7 @@ use std::io::Read;
 use crate::binary_reader::BinaryReader;
 use crate::four_cc::FourCC;
 use crate::read_counter::ReadCounter;
+use crate::MidiEvent;
 use crate::MidiFileError;
 use crate::MidiFileLoopType;
 
@@ -32,10 +33,9 @@ impl Message {
 
         if command == 0xB0 {
             match loop_type {
-                MidiFileLoopType::RpgMaker
-                    if data1 == 111 => {
-                        return Message::LoopStart;
-                    }
+                MidiFileLoopType::RpgMaker if data1 == 111 => {
+                    return Message::LoopStart;
+                }
 
                 MidiFileLoopType::IncredibleMachine => {
                     if data1 == 110 {
@@ -211,7 +211,9 @@ impl MidiFile {
         let mut tick: i32 = 0;
         let mut last_status: u8 = 0;
 
-        loop {
+        // Bounded by the chunk size so that a track without an EOT meta event, or one truncated
+        // mid-event, stops at its own chunk instead of parsing the next MTrk header as event data.
+        while reader.bytes_read() < size {
             let delta = BinaryReader::read_i32_variable_length(reader)?;
             let first = BinaryReader::read_u8(reader)?;
 
@@ -254,6 +256,29 @@ impl MidiFile {
                     }
                     _ => MidiFile::discard_data(reader)?,
                 },
+
+                // System common and system real-time. None of them means
+                // anything to a synthesizer reading a file, but they have to be
+                // consumed at their true length, because the arm below eats two
+                // data bytes for anything it is handed. A single 0xF8 clock or
+                // 0xFE active sensing byte left to fall through there swallows
+                // the two bytes after it, and from that point every delta time,
+                // status byte and key in the track is shifted - the whole rest
+                // of the part comes out as wrong notes rather than as an error.
+                // It also used to leave `last_status` at 0xF1..=0xFE, so every
+                // following running-status event decoded as command 0xF0 and was
+                // dropped by the synthesizer.
+                0xF1 | 0xF3 => {
+                    // MTC quarter frame, song select: one data byte.
+                    BinaryReader::read_u8(reader)?;
+                }
+                0xF2 => {
+                    // Song position pointer: two.
+                    BinaryReader::read_u8(reader)?;
+                    BinaryReader::read_u8(reader)?;
+                }
+                0xF4 | 0xF5 | 0xF6 | 0xF8..=0xFE => (),
+
                 _ => {
                     let command = first & 0xF0;
                     if command == 0xC0 || command == 0xD0 {
@@ -266,11 +291,26 @@ impl MidiFile {
                         messages.push(Message::common2(first, data1, data2, loop_type));
                         ticks.push(tick);
                     }
+
+                    // Only a channel message sets the running status - this is
+                    // the one arm that assigns it. The spec has SysEx and meta
+                    // events cancel running status; this parser deliberately
+                    // lets the previous channel status stand instead, because
+                    // karaoke writers emit a lyric between a note-on and its
+                    // running-status successor and every real player copes.
+                    // Assigning here would put 0xF0 or 0xFF in `last_status`
+                    // and silently drop that successor.
+                    last_status = first;
                 }
             }
-
-            last_status = first
         }
+
+        // The chunk ended without an EOT meta event. Treat it as one rather than reading on into
+        // the next track.
+        messages.push(Message::EndOfTrack);
+        ticks.push(tick);
+
+        Ok((messages, ticks))
     }
 
     fn merge_tracks(
@@ -332,15 +372,196 @@ impl MidiFile {
     pub fn get_length(&self) -> f64 {
         *self.times.last().unwrap()
     }
+
+    /// Gets the channel messages of the MIDI file, in time order, with the
+    /// tempo map already resolved to seconds.
+    ///
+    /// This is the same sequence `MidiFileSequencer` plays, so a host that
+    /// wants to drive `Synthesizer::process_midi_message` itself - to silence a
+    /// channel, to render one part on its own, or to report what a file asked
+    /// for - gets the same events the sequencer would have delivered.
+    ///
+    /// Only channel messages are reported. Tempo changes are already folded
+    /// into each event's time, and the loop markers and end-of-track records
+    /// are not channel messages.
+    pub fn get_events(&self) -> impl Iterator<Item = MidiEvent> + '_ {
+        self.messages
+            .iter()
+            .zip(self.times.iter())
+            .filter_map(|(message, time)| match message {
+                Message::Normal {
+                    status,
+                    data1,
+                    data2,
+                } => Some(MidiEvent {
+                    time: *time,
+                    channel: status & 0x0F,
+                    command: status & 0xF0,
+                    data1: *data1,
+                    data2: *data2,
+                }),
+                _ => None,
+            })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use std::io::Cursor;
+
     #[test]
     fn test_message_size() {
         // Avoid increasing the size of the Message type
         assert_eq!(size_of::<Message>(), 4);
+    }
+
+    fn header(format: u16, track_count: u16) -> Vec<u8> {
+        let mut data = b"MThd   ".to_vec();
+        data.extend_from_slice(&format.to_be_bytes());
+        data.extend_from_slice(&track_count.to_be_bytes());
+        data.extend_from_slice(&96u16.to_be_bytes());
+        data
+    }
+
+    fn track(events: &[u8]) -> Vec<u8> {
+        let mut data = b"MTrk".to_vec();
+        data.extend_from_slice(&(events.len() as u32).to_be_bytes());
+        data.extend_from_slice(events);
+        data
+    }
+
+    #[test]
+    fn test_meta_event_cancels_running_status() {
+        // A meta event terminates running status, so the note-on that follows it in running status
+        // still belongs to the 0x90 that came before, not to the meta event's 0xFF.
+        let mut data = header(0, 1);
+        data.extend_from_slice(&track(&[
+            0x00, 0x90, 0x3C, 0x64, // note on, key 60 - sets the running status
+            0x00, 0xFF, 0x01, 0x01, 0x41, // text meta event "A"
+            0x00, 0x3E, 0x64, // note on, key 62, in running status
+            0x00, 0xFF, 0x2F, 0x00, // end of track
+        ]));
+
+        let midi_file = MidiFile::new(&mut Cursor::new(data)).unwrap();
+
+        let notes: Vec<(u8, u8, u8)> = midi_file
+            .messages
+            .iter()
+            .filter_map(|message| match *message {
+                Message::Normal {
+                    status,
+                    data1,
+                    data2,
+                } => Some((status, data1, data2)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(notes, vec![(0x90, 60, 100), (0x90, 62, 100)]);
+    }
+
+    #[test]
+    fn test_track_without_end_of_track_stops_at_the_chunk_end() {
+        // The first track has no EOT meta event. It must stop at its own chunk rather than reading
+        // the next MTrk header as event data.
+        let mut data = header(1, 2);
+        data.extend_from_slice(&track(&[
+            0x00, 0x90, 0x3C, 0x64, // note on, key 60 - and then nothing
+        ]));
+        data.extend_from_slice(&track(&[
+            0x00, 0x90, 0x3E, 0x64, // note on, key 62
+            0x00, 0xFF, 0x2F, 0x00, // end of track
+        ]));
+
+        let midi_file = MidiFile::new(&mut Cursor::new(data)).unwrap();
+
+        let notes: Vec<(u8, u8, u8)> = midi_file
+            .messages
+            .iter()
+            .filter_map(|message| match *message {
+                Message::Normal {
+                    status,
+                    data1,
+                    data2,
+                } => Some((status, data1, data2)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(notes, vec![(0x90, 60, 100), (0x90, 62, 100)]);
+    }
+
+    #[test]
+    fn test_realtime_status_bytes_do_not_desynchronise_the_track() {
+        // A clock, an active sensing and a tune request byte carry no data. Read
+        // as two-byte channel messages they eat the events after them and every
+        // following note in the track comes out at the wrong pitch.
+        let mut data = header(0, 1);
+        data.extend_from_slice(&track(&[
+            0x00, 0xF8, // clock - no data bytes
+            0x00, 0x90, 0x3C, 0x64, // note on, key 60
+            0x00, 0xFE, // active sensing - no data bytes
+            0x00, 0x3E, 0x64, // note on, key 62, in running status
+            0x00, 0xF6, // tune request - no data bytes
+            0x00, 0xF1, 0x21, // MTC quarter frame - one data byte
+            0x00, 0xF3, 0x05, // song select - one data byte
+            0x00, 0xF2, 0x00, 0x10, // song position pointer - two data bytes
+            0x00, 0x40, 0x64, // note on, key 64, still in running status
+            0x00, 0xFF, 0x2F, 0x00, // end of track
+        ]));
+
+        let midi_file = MidiFile::new(&mut Cursor::new(data)).unwrap();
+
+        let events: Vec<(i32, i32, i32)> = midi_file
+            .get_events()
+            .map(|event| (event.get_command(), event.get_data1(), event.get_data2()))
+            .collect();
+
+        assert_eq!(
+            events,
+            vec![(0x90, 60, 100), (0x90, 62, 100), (0x90, 64, 100)]
+        );
+    }
+
+    #[test]
+    fn test_get_events_splits_the_status_byte_and_resolves_the_tempo() {
+        // get_events has to hand out what the sequencer would have dispatched: the status byte
+        // already split into channel and command, the tempo map already resolved to seconds, and
+        // nothing that is not a channel message.
+        let mut data = header(0, 1);
+        data.extend_from_slice(&track(&[
+            // 240000 us per quarter note, so a quarter note is 0.24 s and one tick is 0.0025 s.
+            0x00, 0xFF, 0x51, 0x03, 0x03, 0xA9, 0x80, //
+            0x00, 0x94, 0x3C, 0x64, // note on, channel 4, key 60
+            0x60, 0xB2, 0x07, 0x40, // 96 ticks later, CC7 on channel 2
+            0x00, 0xC5, 0x19, // program change on channel 5 - one data byte
+            0x00, 0xFF, 0x2F, 0x00, // end of track
+        ]));
+
+        let midi_file = MidiFile::new(&mut Cursor::new(data)).unwrap();
+
+        let events: Vec<(f64, i32, i32, i32, i32)> = midi_file
+            .get_events()
+            .map(|event| {
+                (
+                    event.get_time(),
+                    event.get_channel(),
+                    event.get_command(),
+                    event.get_data1(),
+                    event.get_data2(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            events,
+            vec![
+                (0.0, 4, 0x90, 60, 100),
+                (0.24, 2, 0xB0, 7, 64),
+                (0.24, 5, 0xC0, 25, 0),
+            ]
+        );
     }
 }

@@ -11,6 +11,7 @@ pub enum SynthesizerError {
     SampleRateOutOfRange(i32),
     BlockSizeOutOfRange(usize),
     MaximumPolyphonyOutOfRange(usize),
+    SendScaleOutOfRange(f32),
 }
 
 impl error::Error for SynthesizerError {}
@@ -35,6 +36,13 @@ impl fmt::Display for SynthesizerError {
                     value
                 )
             }
+            SynthesizerError::SendScaleOutOfRange(value) => {
+                write!(
+                    f,
+                    "the send scale must be between 0 and 10, but was {}",
+                    value
+                )
+            }
         }
     }
 }
@@ -54,7 +62,10 @@ pub enum SoundFontError {
         expected: FourCC,
         actual: FourCC,
     },
-    ListContainsUnknownId(FourCC),
+    ListContainsUnknownId {
+        list: FourCC,
+        id: FourCC,
+    },
     SampleDataNotFound,
     UnsupportedSampleFormat,
     SubChunkNotFound(FourCC),
@@ -76,6 +87,7 @@ pub enum SoundFontError {
     InvalidZoneList,
     ZoneNotFound,
     InvalidGeneratorList,
+    InvalidModulatorList,
     SanityCheckFailed,
 }
 
@@ -104,9 +116,10 @@ impl fmt::Display for SoundFontError {
                 "the type of the LIST chunk must be '{}', but was '{}'",
                 expected, actual
             ),
-            SoundFontError::ListContainsUnknownId(id) => {
-                write!(f, "the INFO list contains an unknown ID '{id}'")
-            }
+            SoundFontError::ListContainsUnknownId { list, id } => write!(
+                f,
+                "the '{list}' list contains an unknown ID '{id}' whose size runs past the end of the list"
+            ),
             SoundFontError::SampleDataNotFound => write!(f, "no valid sample data was found"),
             SoundFontError::UnsupportedSampleFormat => write!(f, "SoundFont3 is not yet supported"),
             SoundFontError::SubChunkNotFound(id) => {
@@ -142,6 +155,7 @@ impl fmt::Display for SoundFontError {
             SoundFontError::InvalidZoneList => write!(f, "the zone list is invalid"),
             SoundFontError::ZoneNotFound => write!(f, "no valid zone was found"),
             SoundFontError::InvalidGeneratorList => write!(f, "the generator list is invalid"),
+            SoundFontError::InvalidModulatorList => write!(f, "the modulator list is invalid"),
             SoundFontError::SanityCheckFailed => write!(f, "sanity check failed"),
         }
     }

@@ -8,10 +8,12 @@ use crate::four_cc::FourCC;
 use crate::generator::Generator;
 use crate::instrument::Instrument;
 use crate::instrument_info::InstrumentInfo;
+use crate::modulator::Modulator;
 use crate::preset::Preset;
 use crate::preset_info::PresetInfo;
 use crate::read_counter::ReadCounter;
 use crate::sample_header::SampleHeader;
+use crate::soundfont_warning::{SoundFontWarning, WarningCollector};
 use crate::zone::Zone;
 use crate::zone_info::ZoneInfo;
 
@@ -23,7 +25,12 @@ pub(crate) struct SoundFontParameters {
 }
 
 impl SoundFontParameters {
-    pub(crate) fn new<R: Read>(reader: &mut R) -> Result<Self, SoundFontError> {
+    pub(crate) fn new<R: Read>(
+        reader: &mut R,
+        warnings: &mut WarningCollector,
+    ) -> Result<Self, SoundFontError> {
+        const LIST: FourCC = FourCC::from_bytes(*b"pdta");
+
         let chunk_id = BinaryReader::read_four_cc(reader)?;
         if chunk_id != b"LIST" {
             return Err(SoundFontError::ListChunkNotFound);
@@ -42,9 +49,11 @@ impl SoundFontParameters {
 
         let mut preset_infos: Option<Vec<PresetInfo>> = None;
         let mut preset_bag: Option<Vec<ZoneInfo>> = None;
+        let mut preset_modulators: Option<Vec<Modulator>> = None;
         let mut preset_generators: Option<Vec<Generator>> = None;
         let mut instrument_infos: Option<Vec<InstrumentInfo>> = None;
         let mut instrument_bag: Option<Vec<ZoneInfo>> = None;
+        let mut instrument_modulators: Option<Vec<Modulator>> = None;
         let mut instrument_generators: Option<Vec<Generator>> = None;
         let mut sample_headers: Option<Vec<SampleHeader>> = None;
 
@@ -55,51 +64,78 @@ impl SoundFontParameters {
             match id.as_bytes() {
                 b"phdr" => preset_infos = Some(PresetInfo::read_from_chunk(reader, size)?),
                 b"pbag" => preset_bag = Some(ZoneInfo::read_from_chunk(reader, size)?),
-                b"pmod" => BinaryReader::discard_data(reader, size)?,
+                b"pmod" => preset_modulators = Some(Modulator::read_from_chunk(reader, size)?),
                 b"pgen" => preset_generators = Some(Generator::read_from_chunk(reader, size)?),
                 b"inst" => instrument_infos = Some(InstrumentInfo::read_from_chunk(reader, size)?),
                 b"ibag" => instrument_bag = Some(ZoneInfo::read_from_chunk(reader, size)?),
-                b"imod" => BinaryReader::discard_data(reader, size)?,
+                b"imod" => instrument_modulators = Some(Modulator::read_from_chunk(reader, size)?),
                 b"igen" => instrument_generators = Some(Generator::read_from_chunk(reader, size)?),
                 b"shdr" => sample_headers = Some(SampleHeader::read_from_chunk(reader, size)?),
-                _ => return Err(SoundFontError::ListContainsUnknownId(id)),
+                _ => {
+                    // Bounded, then skipped: see the same check in
+                    // `SoundFontSampleData`.
+                    if size > end - reader.bytes_read() {
+                        return Err(SoundFontError::ListContainsUnknownId { list: LIST, id });
+                    }
+                    warnings.push(SoundFontWarning::UnknownChunk { list: LIST, id });
+                    BinaryReader::discard_data(reader, size)?;
+                }
+            }
+
+            // RIFF pads an odd-sized chunk to an even boundary.
+            if size % 2 == 1 {
+                BinaryReader::discard_data(reader, 1)?;
             }
         }
 
         let preset_infos = preset_infos.ok_or(SoundFontError::SubChunkNotFound(
-            FourCC::from_bytes(*b"PHDR"),
+            FourCC::from_bytes(*b"phdr"),
         ))?;
 
         let preset_bag = preset_bag.ok_or(SoundFontError::SubChunkNotFound(FourCC::from_bytes(
-            *b"PBAG",
+            *b"pbag",
         )))?;
 
         let preset_generators = preset_generators.ok_or(SoundFontError::SubChunkNotFound(
-            FourCC::from_bytes(*b"PGEN"),
+            FourCC::from_bytes(*b"pgen"),
         ))?;
 
         let instrument_infos = instrument_infos.ok_or(SoundFontError::SubChunkNotFound(
-            FourCC::from_bytes(*b"INST"),
+            FourCC::from_bytes(*b"inst"),
         ))?;
 
         let instrument_bag = instrument_bag.ok_or(SoundFontError::SubChunkNotFound(
-            FourCC::from_bytes(*b"IBAG"),
+            FourCC::from_bytes(*b"ibag"),
         ))?;
 
         let instrument_generators = instrument_generators.ok_or(
-            SoundFontError::SubChunkNotFound(FourCC::from_bytes(*b"IGEN")),
+            SoundFontError::SubChunkNotFound(FourCC::from_bytes(*b"igen")),
         )?;
 
         let sample_headers = sample_headers.ok_or(SoundFontError::SubChunkNotFound(
-            FourCC::from_bytes(*b"SHDR"),
+            FourCC::from_bytes(*b"shdr"),
         ))?;
 
-        let instrument_zones = Zone::create(&instrument_bag, &instrument_generators)?;
-        let instruments =
-            Instrument::create(&instrument_infos, &instrument_zones, &sample_headers)?;
+        // Unlike the generator chunks, a missing modulator chunk is not an
+        // error. Plenty of fonts omit it entirely, and one holding nothing but
+        // its terminator is commoner still.
+        let preset_modulators = preset_modulators.unwrap_or_default();
+        let instrument_modulators = instrument_modulators.unwrap_or_default();
 
-        let preset_zones = Zone::create(&preset_bag, &preset_generators)?;
-        let presets = Preset::create(&preset_infos, &preset_zones, &instruments)?;
+        let instrument_zones = Zone::create(
+            &instrument_bag,
+            &instrument_generators,
+            &instrument_modulators,
+        )?;
+        let instruments = Instrument::create(
+            &instrument_infos,
+            &instrument_zones,
+            &sample_headers,
+            warnings,
+        )?;
+
+        let preset_zones = Zone::create(&preset_bag, &preset_generators, &preset_modulators)?;
+        let presets = Preset::create(&preset_infos, &preset_zones, &instruments, warnings)?;
 
         Ok(Self {
             sample_headers,

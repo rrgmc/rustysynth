@@ -7,6 +7,7 @@ use crate::error::SoundFontError;
 use crate::four_cc::FourCC;
 use crate::read_counter::ReadCounter;
 use crate::soundfont_version::SoundFontVersion;
+use crate::soundfont_warning::{SoundFontWarning, WarningCollector};
 
 /// The information of a SoundFont.
 #[derive(Debug)]
@@ -26,7 +27,12 @@ pub struct SoundFontInfo {
 }
 
 impl SoundFontInfo {
-    pub(crate) fn new<R: Read>(reader: &mut R) -> Result<Self, SoundFontError> {
+    pub(crate) fn new<R: Read>(
+        reader: &mut R,
+        warnings: &mut WarningCollector,
+    ) -> Result<Self, SoundFontError> {
+        const LIST: FourCC = FourCC::from_bytes(*b"INFO");
+
         let chunk_id = BinaryReader::read_four_cc(reader)?;
         if chunk_id != b"LIST" {
             return Err(SoundFontError::ListChunkNotFound);
@@ -59,15 +65,23 @@ impl SoundFontInfo {
             let id = BinaryReader::read_four_cc(reader)?;
             let size = BinaryReader::read_u32(reader)? as usize;
 
+            // Every chunk here is bounded by what is left of the list. INFO
+            // chunks are strings whose declared size is what gets allocated,
+            // and one claiming more than the whole list holds is not a long
+            // string, it is a desynchronised stream.
+            if size > end - reader.bytes_read() {
+                return Err(SoundFontError::ListContainsUnknownId { list: LIST, id });
+            }
+
             match id.as_bytes() {
-                b"ifil" => version = Some(SoundFontVersion::new(reader)?),
+                b"ifil" => version = SoundFontInfo::read_version(reader, size)?,
                 b"isng" => {
                     target_sound_engine =
                         Some(BinaryReader::read_fixed_length_string(reader, size)?)
                 }
                 b"INAM" => bank_name = Some(BinaryReader::read_fixed_length_string(reader, size)?),
                 b"irom" => rom_name = Some(BinaryReader::read_fixed_length_string(reader, size)?),
-                b"iver" => rom_version = Some(SoundFontVersion::new(reader)?),
+                b"iver" => rom_version = SoundFontInfo::read_version(reader, size)?,
                 b"ICRD" => {
                     creation_date = Some(BinaryReader::read_fixed_length_string(reader, size)?)
                 }
@@ -78,7 +92,20 @@ impl SoundFontInfo {
                 b"ICOP" => copyright = Some(BinaryReader::read_fixed_length_string(reader, size)?),
                 b"ICMT" => comments = Some(BinaryReader::read_fixed_length_string(reader, size)?),
                 b"ISFT" => tools = Some(BinaryReader::read_fixed_length_string(reader, size)?),
-                _ => return Err(SoundFontError::ListContainsUnknownId(id)),
+                _ => {
+                    // A vendor chunk, or a tag some editor invented. Skipping
+                    // it costs nothing; refusing the whole bank over it - which
+                    // is what used to happen - costs the bank.
+                    warnings.push(SoundFontWarning::UnknownChunk { list: LIST, id });
+                    BinaryReader::discard_data(reader, size)?;
+                }
+            }
+
+            // RIFF pads an odd-sized chunk to an even boundary. Nothing used to
+            // consume that byte, so a font carrying one desynchronised here and
+            // surfaced as a nonsensical unknown ID further along.
+            if size % 2 == 1 {
+                BinaryReader::discard_data(reader, 1)?;
             }
         }
 
@@ -107,6 +134,28 @@ impl SoundFontInfo {
             comments,
             tools,
         })
+    }
+
+    /// Reads a four-byte version out of a chunk that may declare more.
+    ///
+    /// `SoundFontVersion::new` reads exactly four bytes and used to be called
+    /// without reference to the declared size, so an `ifil` of any other length
+    /// desynchronised everything after it.
+    /// A chunk too short to hold one is skipped and leaves the default, which
+    /// is what a missing chunk does anyway.
+    fn read_version<R: Read>(
+        reader: &mut R,
+        size: usize,
+    ) -> Result<Option<SoundFontVersion>, SoundFontError> {
+        if size < 4 {
+            BinaryReader::discard_data(reader, size)?;
+            return Ok(None);
+        }
+
+        let version = SoundFontVersion::new(reader)?;
+        BinaryReader::discard_data(reader, size - 4)?;
+
+        Ok(Some(version))
     }
 
     /// Gets the version of the SoundFont.

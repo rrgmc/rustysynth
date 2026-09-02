@@ -3,6 +3,7 @@
 members = [
     "example",
     "rustysynth",
+    "rustysynth_regress",
     "rustysynth_test",
 ]
 

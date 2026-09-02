@@ -12,7 +12,7 @@ use crate::volume_envelope::VolumeEnvelope;
 pub(crate) struct RegionEx {}
 
 impl RegionEx {
-    pub(crate) fn start_oscillator(oscillator: &mut Oscillator, region: &RegionPair) {
+    pub(crate) fn start_oscillator(oscillator: &mut Oscillator, region: &RegionPair, key: i32) {
         let sample_rate = region.instrument.sample_sample_rate;
         let loop_mode = region.get_sample_modes();
         let start = region.get_sample_start();
@@ -32,6 +32,7 @@ impl RegionEx {
             start_loop,
             end_loop,
             root_key,
+            key,
             coarse_tune,
             fine_tune,
             scale_tuning,

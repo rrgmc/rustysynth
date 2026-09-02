@@ -26,3 +26,7 @@ Cargo.lock
 
 # Local, uncommitted Claude Code instructions
 CLAUDE.local.md
+
+# Claude Code's own working directory, including the nested git worktrees it
+# creates. Local workflow, never committed.
+.claude/

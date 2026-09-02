@@ -11,3 +11,6 @@ mod musescore_info_test;
 mod musescore_instrument_test;
 mod musescore_preset_test;
 mod musescore_sample_test;
+
+mod golden_render_test;
+mod golden_render_util;
