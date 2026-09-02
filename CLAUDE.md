@@ -17,7 +17,7 @@ Cargo workspace with four members:
 | --- | --- |
 | `rustysynth/` | The published library (v1.4.0, edition 2021). All real code lives here. |
 | `rustysynth_test/` | SoundFont-parser regression tests. Note it is a **lib crate** with `#[test]`s in `src/*_test.rs`, not a `tests/` directory. |
-| `rustysynth_regress/` | Unpublished verification harness. Renders a MIDI corpus against SoundFonts too large to commit and reduces each file to one line, so two builds can be compared. Also strips a font's modulator chunks, which is how the "does this still sound the same?" control font is made — none of the available fonts ships without modulators. |
+| `rustysynth_regress/` | Unpublished verification harness. Renders a MIDI corpus against SoundFonts too large to commit and reduces each file to one line, so two builds can be compared. Also strips a font's modulator chunks, which is how the "does this still sound the same?" control font is made — none of the available fonts ships without modulators. `diagnose` goes the other way, taking one file apart: `stems` renders each channel as its own WAV, `notes` reports what every note-on resolved to and its tuning error in cents, `voices` reports the polyphony the file wants. |
 | `example/` | Binary demo that renders `.pcm` files. |
 
 ## Commands
@@ -177,6 +177,11 @@ already resolved to absolute seconds, so no tempo math happens at render time; `
 the wall-clock advance rather than rewriting tempo. Loop markers are detected at parse time from
 the loop-type-specific CCs (`MidiFileLoopType`: RPG Maker CC111, Incredible Machine CC110/111,
 Final Fantasy CC116/117, or an explicit tick).
+
+`MidiFile::get_events` (`midifile.rs`) hands that flattened sequence out as `MidiEvent`s, which is
+how a host drives `Synthesizer::process_midi_message` itself instead of through the sequencer —
+what `rustysynth_regress diagnose stems` uses to render one channel at a time. Only channel
+messages appear; tempo is already in the time and the loop markers are not channel messages.
 
 **Every status byte in `read_track`'s `match` needs a length, or the track desynchronises.** The
 final arm reads two data bytes unconditionally, so a system byte that reaches it eats the events

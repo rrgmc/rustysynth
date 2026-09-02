@@ -200,6 +200,15 @@ impl Voice {
 
     /// Re-evaluates the dynamic modulators. Called once per block, never per
     /// sample: no modulator source changes faster than a block.
+    ///
+    /// One known gap: a dynamic modulator on `COARSE_TUNE`, `FINE_TUNE` or
+    /// `SCALE_TUNING` is refreshed here and then never read. `Oscillator`
+    /// latches all three at note-on out of the `RegionPair` snapshot
+    /// (`region_pair.rs`, `get_coarse_tune` and its neighbours), because they
+    /// are fixed for the voice's life in every font seen so far, so a
+    /// CC-driven detune holds its note-on value until the next note. Wiring it
+    /// up means moving the tune out of `Oscillator::start` and into the
+    /// per-block `pitch`, and no font in the corpus asks for it.
     fn update_dynamic_modulators(&mut self, channel_info: &Channel) {
         for i in 0..self.dynamic_destination_count {
             self.dyn_cb[self.dynamic_destinations[i] as usize] = 0_f32;
