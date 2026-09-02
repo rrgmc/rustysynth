@@ -256,6 +256,29 @@ impl MidiFile {
                     }
                     _ => MidiFile::discard_data(reader)?,
                 },
+
+                // System common and system real-time. None of them means
+                // anything to a synthesizer reading a file, but they have to be
+                // consumed at their true length, because the arm below eats two
+                // data bytes for anything it is handed. A single 0xF8 clock or
+                // 0xFE active sensing byte left to fall through there swallows
+                // the two bytes after it, and from that point every delta time,
+                // status byte and key in the track is shifted - the whole rest
+                // of the part comes out as wrong notes rather than as an error.
+                // It also used to leave `last_status` at 0xF1..=0xFE, so every
+                // following running-status event decoded as command 0xF0 and was
+                // dropped by the synthesizer.
+                0xF1 | 0xF3 => {
+                    // MTC quarter frame, song select: one data byte.
+                    BinaryReader::read_u8(reader)?;
+                }
+                0xF2 => {
+                    // Song position pointer: two.
+                    BinaryReader::read_u8(reader)?;
+                    BinaryReader::read_u8(reader)?;
+                }
+                0xF4 | 0xF5 | 0xF6 | 0xF8..=0xFE => (),
+
                 _ => {
                     let command = first & 0xF0;
                     if command == 0xC0 || command == 0xD0 {
@@ -269,9 +292,14 @@ impl MidiFile {
                         ticks.push(tick);
                     }
 
-                    // Only channel messages set the running status. SysEx and meta events cancel
-                    // it, so leaving it set here would decode the next running-status event with a
-                    // status byte of 0xF0 or 0xFF and silently drop it.
+                    // Only a channel message sets the running status - this is
+                    // the one arm that assigns it. The spec has SysEx and meta
+                    // events cancel running status; this parser deliberately
+                    // lets the previous channel status stand instead, because
+                    // karaoke writers emit a lyric between a note-on and its
+                    // running-status successor and every real player copes.
+                    // Assigning here would put 0xF0 or 0xFF in `last_status`
+                    // and silently drop that successor.
                     last_status = first;
                 }
             }
@@ -463,6 +491,38 @@ mod tests {
             .collect();
 
         assert_eq!(notes, vec![(0x90, 60, 100), (0x90, 62, 100)]);
+    }
+
+    #[test]
+    fn test_realtime_status_bytes_do_not_desynchronise_the_track() {
+        // A clock, an active sensing and a tune request byte carry no data. Read
+        // as two-byte channel messages they eat the events after them and every
+        // following note in the track comes out at the wrong pitch.
+        let mut data = header(0, 1);
+        data.extend_from_slice(&track(&[
+            0x00, 0xF8, // clock - no data bytes
+            0x00, 0x90, 0x3C, 0x64, // note on, key 60
+            0x00, 0xFE, // active sensing - no data bytes
+            0x00, 0x3E, 0x64, // note on, key 62, in running status
+            0x00, 0xF6, // tune request - no data bytes
+            0x00, 0xF1, 0x21, // MTC quarter frame - one data byte
+            0x00, 0xF3, 0x05, // song select - one data byte
+            0x00, 0xF2, 0x00, 0x10, // song position pointer - two data bytes
+            0x00, 0x40, 0x64, // note on, key 64, still in running status
+            0x00, 0xFF, 0x2F, 0x00, // end of track
+        ]));
+
+        let midi_file = MidiFile::new(&mut Cursor::new(data)).unwrap();
+
+        let events: Vec<(i32, i32, i32)> = midi_file
+            .get_events()
+            .map(|event| (event.get_command(), event.get_data1(), event.get_data2()))
+            .collect();
+
+        assert_eq!(
+            events,
+            vec![(0x90, 60, 100), (0x90, 62, 100), (0x90, 64, 100)]
+        );
     }
 
     #[test]

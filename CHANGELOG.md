@@ -4,6 +4,14 @@
   wrong status byte and silently discarded.
 - Fixed an issue where a track without an end-of-track meta event was parsed past the end of its
   own chunk.
+- **Fixed an issue where a system common or real-time status byte desynchronised the rest of the
+  track.** `0xF0`, `0xF7` and `0xFF` were handled and everything else fell through to the channel
+  message arm, which reads two data bytes unconditionally. A single `0xF8` clock or `0xFE` active
+  sensing byte therefore swallowed the two bytes after it, and from that point every delta time,
+  status byte and key in the track was shifted, so the part came out as wrong notes rather than as
+  an error. It also left the running status at `0xF1`..`0xFE`, so each following running-status
+  event decoded as command `0xF0` and was discarded. `0xF1`, `0xF2` and `0xF3` now consume their
+  real data bytes and the rest consume none.
 
 **`scaleTuning` no longer scales pitch bend, vibrato or channel tune.** The oscillator applied it
 to everything modulating the note, not just the key. SF2 2.04 section 8.1.2 defines the generator as

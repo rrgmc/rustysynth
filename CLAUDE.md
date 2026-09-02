@@ -178,6 +178,14 @@ the wall-clock advance rather than rewriting tempo. Loop markers are detected at
 the loop-type-specific CCs (`MidiFileLoopType`: RPG Maker CC111, Incredible Machine CC110/111,
 Final Fantasy CC116/117, or an explicit tick).
 
+**Every status byte in `read_track`'s `match` needs a length, or the track desynchronises.** The
+final arm reads two data bytes unconditionally, so a system byte that reaches it eats the events
+after it and the rest of the part comes out as wrong notes rather than as an error. `0xF1`/`0xF3`
+take one, `0xF2` takes two, and `0xF4`–`0xF6`/`0xF8`–`0xFE` take none. Only the channel-message arm
+assigns `last_status`; a meta or SysEx event deliberately leaves the previous channel status
+standing, against the spec, because karaoke writers put a lyric between a note-on and its
+running-status successor.
+
 ## Conventions
 
 - **Accessors, not public fields.** Types expose `get_xxx()` over `pub(crate)` fields — a
