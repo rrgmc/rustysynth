@@ -17,6 +17,11 @@
   255 into CC 6 under RPN 0 asked for a 255 semitone pitch bend range, and under RPN 1 detuned the
   channel by nearly three semitones for the rest of the file. `(value << 7)` also overflowed the
   packed selector for anything from 256 up, which `process_midi_message` passes through unchecked.
+- **The oscillator's loop wrap subtracts until the position is inside the loop**, rather than once
+  per output sample. One subtraction only suffices while the pitch ratio is below the loop length;
+  above it - a short loop played far above its root key - the position walked past the loop end and
+  kept going, reading a neighbouring sample's audio and eventually indexing off the end of the wave
+  data. No font in the corpus reaches it, and nothing here bounds-checks.
 
 **`scaleTuning` no longer scales pitch bend, vibrato or channel tune.** The oscillator applied it
 to everything modulating the note, not just the key. SF2 2.04 section 8.1.2 defines the generator as

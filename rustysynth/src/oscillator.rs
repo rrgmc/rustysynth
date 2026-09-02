@@ -161,7 +161,16 @@ impl Oscillator {
         let loop_length_fp = loop_length << Oscillator::FRAC_BITS;
 
         for sample in block.iter_mut() {
-            if self.position_fp >= end_loop_fp {
+            // `while`, not `if`: one subtraction per output sample only brings
+            // the position back inside the loop while the pitch ratio is below
+            // the loop length. Above it - a short loop played far above its
+            // root key - the position walks past `end_loop` and keeps going,
+            // and nothing here bounds-checks, so it reads a neighbouring
+            // sample's audio and eventually indexes off the end of the wave
+            // data. `drop_unplayable_regions` guarantees `start_loop <
+            // end_loop` for a looping region, so `loop_length_fp` is at least
+            // one unit and this terminates.
+            while self.position_fp >= end_loop_fp {
                 self.position_fp -= loop_length_fp;
             }
 
