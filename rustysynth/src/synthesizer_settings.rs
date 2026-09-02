@@ -20,6 +20,11 @@ pub struct SynthesizerSettings {
     /// one entirely, and some cap the send well below full scale - GeneralUser
     /// GS stops at 35%. This exists so that a drier mix than intended can be
     /// brought back up without editing the font. 1.0 honors the font.
+    ///
+    /// The scaled send is clamped to full scale, so this cannot raise one that
+    /// already saturates. The default CC91 modulator reaches full scale on its
+    /// own at CC91 127, so a font that leaves it in place saturates near the
+    /// top of the controller's range whatever this is set to.
     pub reverb_send_scale: f32,
     /// Scales how much every voice sends to the chorus. See
     /// `reverb_send_scale`.
