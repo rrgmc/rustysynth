@@ -242,11 +242,29 @@ struct Resolved {
     root_key: i32,
     scale_tuning: i32,
     coarse_tune: i32,
+    /// The `fineTune` generators alone, preset plus instrument.
     fine_tune: i32,
+    /// The sample header's own correction, kept apart from `fine_tune` - see
+    /// `cents_error` for why.
+    pitch_correction: i32,
     sample_rate: i32,
     /// Semitones the oscillator shifts the sample by, relative to its root key.
     pitch_change: f64,
-    /// How far the sounding pitch lands from the key that was asked for.
+    /// How far the sounding pitch lands from the key that was asked for,
+    /// **excluding** the sample's pitch correction.
+    ///
+    /// The correction has to come out, because it is not an error - it is the
+    /// cancellation of one. SF2 8.1.4 defines it as the amount needed to undo
+    /// the sample's own recording error, so a region whose only deviation is
+    /// its correction is in tune, not out of it. GeneralUser-GS's sitar samples
+    /// measure 61 to 68 cents sharp of their root key and carry a correction of
+    /// -61; counting that as error made the sitar the worst-looking channel in
+    /// the file when it is one of the better-tuned ones.
+    ///
+    /// Meaningless on a percussion channel, where the font transposes a sample
+    /// freely to reach the sound the key stands for and the key is not a pitch
+    /// at all. The summary leaves those channels out of the average for that
+    /// reason.
     cents_error: f64,
 }
 
@@ -293,21 +311,26 @@ fn resolve(
                 continue;
             }
 
+            let sample = &sound_font.get_sample_headers()[instrument_region.get_sample_id()];
+
             // The same sums RegionPair::get_* makes: the three tuning
             // generators are preset plus instrument, and the root key comes
-            // from the instrument alone. InstrumentRegion::get_fine_tune
-            // already folds in the sample's pitch correction.
+            // from the instrument alone.
             let scale_tuning =
                 preset_region.get_scale_tuning() + instrument_region.get_scale_tuning();
             let coarse_tune = preset_region.get_coarse_tune() + instrument_region.get_coarse_tune();
-            let fine_tune = preset_region.get_fine_tune() + instrument_region.get_fine_tune();
             let root_key = instrument_region.get_root_key();
+
+            // InstrumentRegion::get_fine_tune folds the sample's pitch
+            // correction in, which is right for the oscillator and wrong for
+            // the error column, so hold the two apart.
+            let pitch_correction = sample.get_pitch_correction();
+            let fine_tune = preset_region.get_fine_tune() + instrument_region.get_fine_tune()
+                - pitch_correction;
 
             let pitch_change = (scale_tuning as f64 / 100_f64) * (key - root_key) as f64
                 + coarse_tune as f64
-                + 0.01_f64 * fine_tune as f64;
-
-            let sample = &sound_font.get_sample_headers()[instrument_region.get_sample_id()];
+                + 0.01_f64 * (fine_tune + pitch_correction) as f64;
 
             out.push(Resolved {
                 preset: preset.get_name().to_string(),
@@ -317,9 +340,11 @@ fn resolve(
                 scale_tuning,
                 coarse_tune,
                 fine_tune,
+                pitch_correction,
                 sample_rate: sample.get_sample_rate(),
                 pitch_change,
-                cents_error: (root_key as f64 + pitch_change - key as f64) * 100_f64,
+                cents_error: (root_key as f64 + pitch_change - key as f64) * 100_f64
+                    - pitch_correction as f64,
             });
         }
     }
@@ -335,7 +360,7 @@ pub fn notes(sound_font_path: &Path, midi_path: &Path, output: &Path) -> Result<
     let mut writer = BufWriter::new(file);
     writeln!(
         writer,
-        "time\tchannel\tkey\tvelocity\tbank\tpatch\tpreset\tinstrument\tsample\troot_key\tscale_tuning\tcoarse_tune\tfine_tune\tsample_rate\tpitch_change\tcents_error"
+        "time\tchannel\tkey\tvelocity\tbank\tpatch\tpreset\tinstrument\tsample\troot_key\tscale_tuning\tcoarse_tune\tfine_tune\tpitch_correction\tsample_rate\tpitch_change\tcents_error"
     )
     .map_err(|e| e.to_string())?;
 
@@ -381,7 +406,7 @@ pub fn notes(sound_font_path: &Path, midi_path: &Path, output: &Path) -> Result<
                 for row in &resolved {
                     writeln!(
                         writer,
-                        "{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{:+.1}",
+                        "{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{:+.1}",
                         event.get_time(),
                         channel,
                         key,
@@ -395,6 +420,7 @@ pub fn notes(sound_font_path: &Path, midi_path: &Path, output: &Path) -> Result<
                         row.scale_tuning,
                         row.coarse_tune,
                         row.fine_tune,
+                        row.pitch_correction,
                         row.sample_rate,
                         row.pitch_change,
                         row.cents_error,
@@ -438,14 +464,22 @@ pub fn notes(sound_font_path: &Path, midi_path: &Path, output: &Path) -> Result<
         println!("  {silent} note-ons matched no region at all - those play silence");
     }
 
-    println!("\n  mean absolute tuning error, and the worst note, per channel:");
+    println!(
+        "\n  mean absolute tuning error, and the worst note, per channel.
+  The sample's own pitch correction is excluded - it cancels a recording
+  error rather than causing one. Percussion is reported but not judged: a
+  drum key names a sound, not a pitch, so the font transposes freely."
+    );
     for (channel, (count, total)) in &per_channel {
         let mean = total / *count as f64;
         let detail = worst
             .get(channel)
             .map(|(_, text)| text.as_str())
             .unwrap_or("");
-        println!("    ch{channel:02}  {count:5} voices  mean {mean:6.1} cents  worst: {detail}");
+        let note = if *channel == 9 { "  (percussion)" } else { "" };
+        println!(
+            "    ch{channel:02}  {count:5} voices  mean {mean:6.1} cents{note}  worst: {detail}"
+        );
     }
 
     Ok(())
