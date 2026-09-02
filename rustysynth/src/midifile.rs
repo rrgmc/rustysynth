@@ -5,6 +5,7 @@ use std::io::Read;
 use crate::binary_reader::BinaryReader;
 use crate::four_cc::FourCC;
 use crate::read_counter::ReadCounter;
+use crate::MidiEvent;
 use crate::MidiFileError;
 use crate::MidiFileLoopType;
 
@@ -343,6 +344,37 @@ impl MidiFile {
     pub fn get_length(&self) -> f64 {
         *self.times.last().unwrap()
     }
+
+    /// Gets the channel messages of the MIDI file, in time order, with the
+    /// tempo map already resolved to seconds.
+    ///
+    /// This is the same sequence `MidiFileSequencer` plays, so a host that
+    /// wants to drive `Synthesizer::process_midi_message` itself - to silence a
+    /// channel, to render one part on its own, or to report what a file asked
+    /// for - gets the same events the sequencer would have delivered.
+    ///
+    /// Only channel messages are reported. Tempo changes are already folded
+    /// into each event's time, and the loop markers and end-of-track records
+    /// are not channel messages.
+    pub fn get_events(&self) -> impl Iterator<Item = MidiEvent> + '_ {
+        self.messages
+            .iter()
+            .zip(self.times.iter())
+            .filter_map(|(message, time)| match message {
+                Message::Normal {
+                    status,
+                    data1,
+                    data2,
+                } => Some(MidiEvent {
+                    time: *time,
+                    channel: status & 0x0F,
+                    command: status & 0xF0,
+                    data1: *data1,
+                    data2: *data2,
+                }),
+                _ => None,
+            })
+    }
 }
 
 #[cfg(test)]
@@ -431,5 +463,45 @@ mod tests {
             .collect();
 
         assert_eq!(notes, vec![(0x90, 60, 100), (0x90, 62, 100)]);
+    }
+
+    #[test]
+    fn test_get_events_splits_the_status_byte_and_resolves_the_tempo() {
+        // get_events has to hand out what the sequencer would have dispatched: the status byte
+        // already split into channel and command, the tempo map already resolved to seconds, and
+        // nothing that is not a channel message.
+        let mut data = header(0, 1);
+        data.extend_from_slice(&track(&[
+            // 240000 us per quarter note, so a quarter note is 0.24 s and one tick is 0.0025 s.
+            0x00, 0xFF, 0x51, 0x03, 0x03, 0xA9, 0x80, //
+            0x00, 0x94, 0x3C, 0x64, // note on, channel 4, key 60
+            0x60, 0xB2, 0x07, 0x40, // 96 ticks later, CC7 on channel 2
+            0x00, 0xC5, 0x19, // program change on channel 5 - one data byte
+            0x00, 0xFF, 0x2F, 0x00, // end of track
+        ]));
+
+        let midi_file = MidiFile::new(&mut Cursor::new(data)).unwrap();
+
+        let events: Vec<(f64, i32, i32, i32, i32)> = midi_file
+            .get_events()
+            .map(|event| {
+                (
+                    event.get_time(),
+                    event.get_channel(),
+                    event.get_command(),
+                    event.get_data1(),
+                    event.get_data2(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            events,
+            vec![
+                (0.0, 4, 0x90, 60, 100),
+                (0.24, 2, 0xB0, 7, 64),
+                (0.24, 5, 0xC0, 25, 0),
+            ]
+        );
     }
 }

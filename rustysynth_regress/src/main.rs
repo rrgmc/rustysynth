@@ -19,6 +19,7 @@ use std::sync::Arc;
 use rustysynth::SoundFont;
 
 mod census;
+mod diagnose;
 mod load;
 mod probe;
 mod render;
@@ -35,7 +36,10 @@ fn usage() -> ExitCode {
   render <sf2> <list.txt> <out.tsv>     render each listed MIDI file, hash it
   sample <dir> <count> <out.txt>        stratified sample of a MIDI corpus
   compare <a.tsv> <b.tsv>               report rows that differ
-  probe <sf2> <patch>                   velocity response and send scale of one patch"
+  probe <sf2> <patch>                   velocity response and send scale of one patch
+  diagnose stems <sf2> <mid> <outdir>   render each channel on its own, as WAV
+  diagnose notes <sf2> <mid> <out.tsv>  what every note-on resolved to, and its tuning error
+  diagnose voices <sf2> <mid>           how much polyphony the file actually wants"
     );
     ExitCode::from(2)
 }
@@ -58,6 +62,19 @@ fn main() -> ExitCode {
         ("sample", 4) => render::sample(Path::new(&args[1]), &args[2], Path::new(&args[3])),
         ("compare", 3) => render::compare(Path::new(&args[1]), Path::new(&args[2])),
         ("probe", 3) => probe::run(Path::new(&args[1]), &args[2]),
+        ("diagnose", 5) if args[1] == "stems" => diagnose::stems(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+        ),
+        ("diagnose", 5) if args[1] == "notes" => diagnose::notes(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+        ),
+        ("diagnose", 4) if args[1] == "voices" => {
+            diagnose::voices(Path::new(&args[2]), Path::new(&args[3]))
+        }
         _ => return usage(),
     };
 

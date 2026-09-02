@@ -523,6 +523,15 @@ impl Synthesizer {
         self.effects.is_some()
     }
 
+    /// Gets the number of voices currently sounding.
+    ///
+    /// A single note-on starts one voice per matching region, so this rises
+    /// faster than the note count on a layered font, and it saturates at
+    /// `get_maximum_polyphony` - past which a new note steals a sounding voice.
+    pub fn get_active_voice_count(&self) -> usize {
+        self.voices.active_voice_count
+    }
+
     /// Gets the master volume.
     pub fn get_master_volume(&self) -> f32 {
         self.master_volume
