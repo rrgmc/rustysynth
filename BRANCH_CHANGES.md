@@ -1,8 +1,8 @@
 # Changes on `feat/lenient-soundfont-loading`
 
-Summary of what this branch changes relative to `main` (32 commits, 52 files): SF2 modulator
-support, lenient SoundFont loading, two fixes to the pitch path, a round of hardening and three MIDI
-parsing fixes. The crate goes from 1.3.6 to 1.5.0 and still has zero dependencies. `CHANGELOG.md`
+Summary of what this branch changes relative to `main` (33 commits, 53 files): SF2 modulator
+support, lenient SoundFont loading, two fixes to the pitch path, the MIDI channel mode messages, a
+round of hardening and three MIDI parsing fixes. The crate goes from 1.3.6 to 1.5.0 and still has zero dependencies. `CHANGELOG.md`
 carries the full account with the measurements; this is the short version.
 
 ## SF2 modulators
@@ -87,6 +87,25 @@ carries the full account with the measurements; this is the short version.
   error. It also stranded the running status, so the following events decoded as `0xF0` and were
   dropped.
 
+## MIDI channel modes
+
+- **CC124-127 were ignored outright.** CC126 now puts a channel monophonic, CC127 returns it to
+  polyphonic, and all four act as All Notes Off as the spec requires of every mode message.
+  Karaoke files write monophonic leads as slurs, each note-on landing before the previous note-off,
+  and declare the channel mono so the receiver collapses them; played polyphonically each slur is a
+  brief second or seventh instead. `EBONYIVO.KAR` declares mono on five channels and has seventeen
+  such overlaps, 31 to 123 ms each.
+- **Last-note priority**, because that file needs it: it nests a 60 ms grace note inside an 800 ms
+  sustained one, and stopping the old note without falling back to the key still held loses the
+  sustained note entirely. The held keys are a fixed sixteen-entry array on the channel, since
+  note-on may not allocate.
+- Omni Off and Omni On deliberately do not select mono or poly - the two are orthogonal bits of the
+  MIDI mode, so a file sending the conventional CC124 + CC126 pair for mode 4 would otherwise be
+  forced back to poly. Mono mode survives Reset All Controllers, which resets controllers and not
+  channel modes. The previous note is released rather than killed, so a release tail of the older
+  pitch remains; hardware reassigns one voice and has no overlap at all, which would mean changing a
+  sounding voice's key.
+
 ## New public API
 
 `Modulator`, `ModulatorSource`, `SoundFontWarning` and `RegionDefect` are exported;
@@ -119,6 +138,16 @@ GeneralUser GS, 142 are bit-identical and 8 differ - the files that bend a note 
 did not leave at `scaleTuning` 100 - with no NaN and nothing newly failing. The three hardening
 fixes above move no row at all. The drum retune was confirmed end to end on a two-file controlled
 render rather than inferred: the retuned key moves by -9.00 semitones, the value the file asks for.
+
+The channel modes were verified against the files that actually use them rather than a blind sample:
+of 25,000 corpus files, 641 send CC124-127, and rendering all 641 through GeneralUser GS on both
+builds moves 50 rows. 45 of those are files that declare mono - the fix doing its work. The other
+five are the new All Notes Off on a non-mono mode message, and each loses one or two notes, four of
+them a single drum hit on channel 9 and three of them in the first bar. A 150 file random sample is
+bit-identical, which is the expected result: only 2.6% of the corpus sends these controllers at all.
+`EBONYIVO.KAR` was also checked by ear-equivalent measurement rather than by hash - the older pitch
+of each clash drops out and the sustained note the grace note used to kill returns within 1.3 dB of
+where it was.
 
 One caveat: none of the four unopenable banks the leniency was written for were available to test
 against, so what is verified is the mechanism and the absence of regression, not that those specific
