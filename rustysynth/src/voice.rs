@@ -601,6 +601,13 @@ impl Voice {
         self.key
     }
 
+    /// True while the voice is sounding and has had no note-off. An ended
+    /// voice is still active - it retires only when its release envelope
+    /// finishes - so this is what distinguishes "stopped" from "gone".
+    pub(crate) fn is_playing(&self) -> bool {
+        self.voice_state == VoiceState::Playing
+    }
+
     pub(crate) fn priority(&self) -> f32 {
         if self.note_gain < SoundFontMath::NON_AUDIBLE {
             0_f32

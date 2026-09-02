@@ -21,6 +21,29 @@ pub(crate) struct Channel {
     expression: i16,
     hold_pedal: bool,
 
+    /// MIDI mono mode (CC126) rather than poly mode (CC127) - modes 4 and 3.
+    ///
+    /// The data byte of CC126 is "M", the number of channels the mono span
+    /// covers, which only means something to a receiver that assigns several
+    /// MIDI channels to one instrument. This synthesizer has sixteen
+    /// independent channels, each its own basic channel, so M has nothing to
+    /// say here and any CC126 means "this channel plays one note at a time".
+    /// The raw byte is still recorded in `cc` below, so a modulator naming the
+    /// controller still sees it.
+    mono_mode: bool,
+
+    /// Keys held on this channel while it is in mono mode, oldest first, with
+    /// the velocity each arrived at. Only the last entry is sounding; the rest
+    /// are what the channel falls back to as notes are released, which is what
+    /// "last-note priority" means on a monophonic MIDI receiver.
+    ///
+    /// A fixed array rather than a `Vec` because this is reached from note-on:
+    /// nothing on that path allocates. Sixteen is far past what a monophonic
+    /// line does in practice - a slur holds two keys, a trill three - and the
+    /// oldest entry is discarded if a file somehow exceeds it.
+    mono_stack: [(u8, u8); Channel::MONO_STACK_LEN],
+    mono_stack_len: usize,
+
     /// Raw 7-bit value of every controller, so that modulators can name one
     /// this synthesizer has no dedicated field for. CC1, CC7, CC10 and CC11
     /// are also tracked at 14 bits above and are read from there instead;
@@ -49,6 +72,8 @@ pub(crate) struct Channel {
 }
 
 impl Channel {
+    const MONO_STACK_LEN: usize = 16;
+
     const CC_MODULATION: usize = 1;
     const CC_VOLUME: usize = 7;
     const CC_PAN: usize = 10;
@@ -67,6 +92,9 @@ impl Channel {
             pan: 0,
             expression: 0,
             hold_pedal: false,
+            mono_mode: false,
+            mono_stack: [(0, 0); Channel::MONO_STACK_LEN],
+            mono_stack_len: 0,
             cc: [0; 128],
             channel_pressure: 0,
             poly_pressure: [0; 128],
@@ -94,6 +122,8 @@ impl Channel {
         self.pan = 64 << 7;
         self.expression = 127 << 7;
         self.hold_pedal = false;
+        self.mono_mode = false;
+        self.mono_stack_len = 0;
 
         self.cc = [0; 128];
         // Keep the raw entries for the 14-bit controllers consistent with the
@@ -136,7 +166,10 @@ impl Channel {
         // Mirror the above into the raw controller state, and reset the
         // pressures with it. Volume, pan and the effect sends are deliberately
         // left alone, matching both the GM spec and this method's existing
-        // behavior.
+        // behavior. So is `mono_mode`: mono/poly is a channel *mode*, not a
+        // controller, and is not on the GM Reset All Controllers list. A file
+        // that declares mono in its header and sends CC121 mid-song has to
+        // stay mono.
         self.cc[Channel::CC_MODULATION] = 0;
         self.cc[Channel::CC_EXPRESSION] = 127;
         self.cc[Channel::CC_HOLD_PEDAL] = 0;
@@ -197,6 +230,52 @@ impl Channel {
 
     pub(crate) fn set_hold_pedal(&mut self, value: i32) {
         self.hold_pedal = value >= 64;
+    }
+
+    /// Selects mono mode (CC126) or poly mode (CC127).
+    ///
+    /// Takes a `bool` rather than the data byte every other setter here takes,
+    /// because it is the *controller number* that picks the mode.
+    pub(crate) fn set_mono_mode(&mut self, value: bool) {
+        self.mono_mode = value;
+    }
+
+    /// Records a key as held, as the newest. A key already on the stack moves
+    /// to the top rather than appearing twice, so a repeated note-on without
+    /// its note-off cannot make the channel fall back to itself.
+    pub(crate) fn mono_push(&mut self, key: i32, velocity: i32) {
+        self.mono_remove(key);
+
+        if self.mono_stack_len == Channel::MONO_STACK_LEN {
+            self.mono_stack.copy_within(1.., 0);
+            self.mono_stack_len -= 1;
+        }
+
+        self.mono_stack[self.mono_stack_len] = ((key & 0x7F) as u8, (velocity & 0x7F) as u8);
+        self.mono_stack_len += 1;
+    }
+
+    /// Forgets a held key, wherever it sits in the stack.
+    pub(crate) fn mono_remove(&mut self, key: i32) {
+        let key = (key & 0x7F) as u8;
+        if let Some(at) = self.mono_stack[..self.mono_stack_len]
+            .iter()
+            .position(|entry| entry.0 == key)
+        {
+            self.mono_stack.copy_within(at + 1..self.mono_stack_len, at);
+            self.mono_stack_len -= 1;
+        }
+    }
+
+    pub(crate) fn mono_clear(&mut self) {
+        self.mono_stack_len = 0;
+    }
+
+    /// The key the channel should be sounding: the most recently held one.
+    pub(crate) fn mono_top(&self) -> Option<(i32, i32)> {
+        self.mono_stack_len
+            .checked_sub(1)
+            .map(|at| (self.mono_stack[at].0 as i32, self.mono_stack[at].1 as i32))
     }
 
     pub(crate) fn set_reverb_send(&mut self, value: i32) {
@@ -340,6 +419,10 @@ impl Channel {
 
     pub(crate) fn get_hold_pedal(&self) -> bool {
         self.hold_pedal
+    }
+
+    pub(crate) fn get_mono_mode(&self) -> bool {
+        self.mono_mode
     }
 
     pub(crate) fn get_reverb_send(&self) -> f32 {
@@ -504,6 +587,32 @@ mod tests {
         channel.set_pitch_bend(0x7F, 0x7F);
         assert!((channel.get_pitch_bend_normalized() - 1_f32).abs() < 1.0e-3);
     }
+    /// CC126 and CC127 select a channel *mode*, not a controller value. A
+    /// reset returns the channel to poly, which is the GM power-up default,
+    /// but Reset All Controllers deliberately does not - a file that declares
+    /// mono in its header and sends CC121 mid-song has to stay mono.
+    #[test]
+    fn mono_mode_survives_reset_all_controllers_but_not_reset() {
+        let mut channel = Channel::new(false);
+        assert!(!channel.get_mono_mode());
+
+        channel.set_mono_mode(true);
+        assert!(channel.get_mono_mode());
+
+        channel.reset_all_controllers();
+        assert!(channel.get_mono_mode());
+
+        // The hold pedal is the deliberate contrast: it *is* a controller, so
+        // Reset All Controllers clears it while mono mode survives.
+        channel.set_hold_pedal(127);
+        channel.reset_all_controllers();
+        assert!(!channel.get_hold_pedal());
+        assert!(channel.get_mono_mode());
+
+        channel.reset();
+        assert!(!channel.get_mono_mode());
+    }
+
     /// A malformed MIDI file can deliver a data byte with the high bit set.
     /// The corpus has files that land 255 in CC11, and unmasked that made
     /// `expression` 1.99 rather than at most 1 - which the old squared channel

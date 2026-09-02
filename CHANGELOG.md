@@ -1,5 +1,36 @@
 # v1.5.0
 
+**MIDI channel mode messages are honored.** CC126 (Mono Mode On) puts a channel monophonic and CC127
+(Poly Mode On) returns it to polyphonic; CC124-127 all act as All Notes Off, as the spec requires of
+every mode message. They were previously ignored outright.
+
+Karaoke and sequencer files write monophonic leads as slurred pairs, with each note-on landing before
+the previous note-off, and declare the channel mono so the receiver collapses them. Rendered
+polyphonically each slur is instead a brief second or seventh - one `.KAR` in the test corpus has
+seventeen of them, 31 to 123 ms each, spread over its lead lines.
+
+Two details of the implementation are deliberate:
+
+- **Last-note priority.** Releasing the key a mono channel is sounding hands it back to the newest
+  key still held, rather than silencing the channel. Files nest a short grace note inside a long
+  sustained one - measured on that same file, without the fallback the sustained note is stopped by a
+  60 ms grace note and never returns, losing 13 to 24 dB across the 800 ms it should have gone on
+  ringing. The held keys live in a fixed sixteen-entry array on the channel, because note-on does not
+  allocate.
+- **The previous note is released, not cut**, so it runs the font's release envelope. A hardware
+  monophonic receiver reassigns one voice and so has no overlap at all; releasing leaves a decaying
+  tail of the older pitch. Matching that exactly would mean changing a sounding voice's key, and
+  `Voice::start` is the only place a voice's key, envelopes, LFOs and oscillator are set.
+
+Omni Off and Omni On (CC124/125) deliberately do not select mono or poly - omni and mono/poly are
+orthogonal bits of the MIDI mode, so a file sending the conventional CC124 + CC126 pair for mode 4
+would otherwise be forced back to poly. Mono mode survives Reset All Controllers, which resets
+controllers and not channel modes, and is cleared by a full reset. The sustain pedal still wins:
+a mono channel holding CC64 goes on stacking notes, since `Voice::release_if_necessary` will not
+release while the pedal is down.
+
+Portamento (CC5, CC65, CC84) and the GS NRPN vibrato parameters remain unimplemented.
+
 - Fixed an issue where a running status event following a meta or SysEx event was decoded with the
   wrong status byte and silently discarded.
 - Fixed an issue where a track without an end-of-track meta event was parsed past the end of its
