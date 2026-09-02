@@ -1,9 +1,11 @@
-# Changes on `feat/lenient-soundfont-loading`
+# Changes on `custom`
 
-What this branch changes relative to `main` (36 commits, 52 files): SF2 modulator support, lenient
-SoundFont loading, two fixes to the pitch path, the MIDI channel mode messages, a round of hardening
-and three MIDI parsing fixes. The crate goes from 1.3.6 to 1.5.0 and keeps its zero dependencies.
-`CHANGELOG.md` carries the full account with the measurements; this is the short version.
+What this fork changes relative to upstream `main` (41 commits, 52 files): SF2 modulator support,
+lenient SoundFont loading, two fixes to the pitch path, the MIDI channel mode messages, a round of
+hardening and three MIDI parsing fixes. `feat/lenient-soundfont-loading`, where most of it was
+written, has been merged into `custom` and deleted. The crate goes from 1.3.6 to 1.5.0 and keeps its
+zero dependencies. `CHANGELOG.md` carries the full account with the measurements; this is the short
+version.
 
 ## SF2 modulators
 
@@ -13,7 +15,9 @@ and three MIDI parsing fixes. The crate goes from 1.3.6 to 1.5.0 and keeps its z
 - Channel pressure (aftertouch) and polyphonic key pressure are received; channel pressure drives
   vibrato depth through SF2 default modulator 3 and previously had no effect.
 - Added `SynthesizerSettings::reverb_send_scale` and `chorus_send_scale`, for fonts that cap their
-  own sends well below full scale.
+  own sends well below full scale. Neither can raise a send that already saturates - the scaled
+  value is clamped to full scale, and the default CC91 and CC93 modulators reach full scale on their
+  own near the top of the controller's range.
 - Deviations from SF2 2.04, chosen to preserve existing output: default modulator 2 is omitted (as
   FluidSynth does), default modulator 10 is handled natively in `voice.rs`, the send defaults use
   amount 1000 rather than 200, and linked modulators and non-identity transforms are dropped at load
@@ -71,9 +75,6 @@ and three MIDI parsing fixes. The crate goes from 1.3.6 to 1.5.0 and keeps its z
   both agogo bells; dropping it left 915 of that file's 1,982 percussion notes at the wrong pitch,
   the agogos nine semitones off and the only pitched percussion in the arrangement. Every other NRPN
   is still accepted and dropped.
-- One limitation written down rather than fixed: a dynamic modulator on `coarseTune`, `fineTune` or
-  `scaleTuning` is re-evaluated every block and then never read, because the oscillator latches all
-  three out of the note-on snapshot. No bank tested asks for it.
 
 ## MIDI file parsing
 
@@ -102,15 +103,18 @@ and three MIDI parsing fixes. The crate goes from 1.3.6 to 1.5.0 and keeps its z
 - Omni Off and Omni On deliberately do not select mono or poly - the two are orthogonal bits of the
   MIDI mode, so a file sending the conventional CC124 + CC126 pair for mode 4 would otherwise be
   forced back to poly. Mono mode survives Reset All Controllers, which resets controllers and not
-  channel modes. The previous note is released rather than killed, so a release tail of the older
-  pitch remains; hardware reassigns one voice and has no overlap at all, which would mean changing a
-  sounding voice's key.
+  channel modes, and is cleared by a full reset. The sustain pedal still wins: a mono channel
+  holding CC64 goes on stacking notes, since `Voice::release_if_necessary` will not release while
+  the pedal is down. The previous note is released rather than killed, so a release tail of the
+  older pitch remains; hardware reassigns one voice and has no overlap at all, which would mean
+  changing a sounding voice's key.
 
 ## New public API
 
-`Modulator`, `ModulatorSource`, `SoundFontWarning` and `RegionDefect` are exported;
+`Modulator`, `ModulatorSource`, `SoundFontWarning`, `RegionDefect` and `MidiEvent` are exported;
 `SoundFont::get_warnings()` and `get_warning_count()`, `PresetRegion::get_modulators()` and
-`InstrumentRegion::get_modulators()`, and the two send-scale settings are new.
+`InstrumentRegion::get_modulators()`, `MidiFile::get_events()`,
+`Synthesizer::get_active_voice_count()` and the two send-scale settings are new.
 
 ## Tests and tooling
 
@@ -119,12 +123,27 @@ and three MIDI parsing fixes. The crate goes from 1.3.6 to 1.5.0 and keeps its z
   file to one line so two builds can be compared, against fonts too large to commit.
 - `diagnose` inspects one file: `stems` renders each channel as its own WAV, `notes` reports what
   every note-on resolved to and, in cents, the offset from equal temperament the font asks for, and
-  `voices` reports the polyphony the file wants. It needs `MidiFile::get_events`, also new, to drive
-  `process_midi_message` per channel.
+  `voices` reports the polyphony the file wants. It drives `process_midi_message` per channel
+  through `MidiFile::get_events`, also new.
 - Seven committed fixtures in `samples/` - six carrying one malformed record each, one carrying
   modulators - built by `make_test_malformed.py` and `make_test_modulators.py`.
 - A golden-render test in `rustysynth_test`, compared by tolerance rather than by hash, plus
   channel-state and modulator-merge unit tests in the library crate.
+
+## Not addressed
+
+- Portamento (CC5, CC65, CC84) and the GS NRPN vibrato parameters remain unimplemented.
+- A dynamic modulator on `coarseTune`, `fineTune` or `scaleTuning` is re-evaluated every block and
+  then never read, because the oscillator latches all three out of the note-on snapshot. No bank
+  tested asks for it.
+- SF3 is still refused, `sm24` is still discarded so playback is 16-bit, and the whole `smpl` chunk
+  is still held resident. SF3 is the one with real leverage - the same MuseScore bank is 38 MiB as
+  `.sf3` against 206 MiB as `.sf2` - and would need an Ogg Vorbis decoder, so it would have to
+  arrive as an optional cargo feature, leaving default builds dependency-free.
+- The four unopenable banks the leniency was written for were not among those tested, so what is
+  verified is the mechanism and the absence of regression, not that those specific files now play.
+- No automated check hears anything. The corpus comparison proves that two builds agree, not that
+  either one is right.
 
 ## Verification on record
 
@@ -147,8 +166,3 @@ channel 9 and three of them in the first bar. A 150 file random sample is bit-id
 the expected result: only 2.6% of the sample sends these controllers at all. The mono file above was
 also checked by measurement rather than by hash - the older pitch of each clash drops out and the
 sustained note the grace note used to kill returns within 1.3 dB of where it was.
-
-Two caveats. The four unopenable banks the leniency was written for were not among those tested, so
-what is verified is the mechanism and the absence of regression, not that those specific files now
-play. And no automated check hears anything - the corpus comparison proves two builds agree, not
-that either is right.
