@@ -116,6 +116,13 @@ version.
 `InstrumentRegion::get_modulators()`, `MidiFile::get_events()`,
 `Synthesizer::get_active_voice_count()` and the two send-scale settings are new.
 
+`Synthesizer::get_channel_pitch_bend_range()`, `get_channel_tune()` and `get_channel_key_tune()`
+read back the three tuning parameters a file establishes through RPN and NRPN. A host cannot tell
+from the control changes it sent whether any of them was acted on, because a data entry arriving
+with no parameter selected is discarded in silence: the same six messages in a different order
+either set a bend range or set nothing, and the difference surfaces only as a part playing out of
+tune. These make it a value a caller can assert on.
+
 ## Tests and tooling
 
 - `rustysynth_regress` is a new, unpublished workspace member: `load`, `census`, `strip-mods`,

@@ -632,6 +632,42 @@ impl Synthesizer {
     pub fn set_master_volume(&mut self, value: f32) {
         self.master_volume = value;
     }
+
+    /// Gets a channel's pitch bend range, in semitones.
+    ///
+    /// A file establishes this with RPN 0, and a channel that never does holds
+    /// the General MIDI default of 2. Reading it back is what lets a caller
+    /// check that a registered parameter it sent was acted on. The control
+    /// changes it sent cannot say on their own, because a data entry arriving
+    /// with no parameter selected is discarded silently. An out-of-range
+    /// channel reads as the default.
+    pub fn get_channel_pitch_bend_range(&self, channel: i32) -> f32 {
+        match self.channels.get(channel as usize) {
+            Some(channel) => channel.get_pitch_bend_range(),
+            None => 2_f32,
+        }
+    }
+
+    /// Gets a channel's tune in semitones, RPN 1 and RPN 2 together.
+    pub fn get_channel_tune(&self, channel: i32) -> f32 {
+        match self.channels.get(channel as usize) {
+            Some(channel) => channel.get_tune(),
+            None => 0_f32,
+        }
+    }
+
+    /// Gets the semitones one key of a channel is retuned by, from GS NRPN 18H.
+    ///
+    /// Drum instrument pitch coarse, where each key is a separate instrument, so
+    /// a channel-wide tune cannot express what the file asks for. Zero on a
+    /// melodic channel whatever the file wrote, because the same key numbers are
+    /// pitches the font already tunes there.
+    pub fn get_channel_key_tune(&self, channel: i32, key: i32) -> f32 {
+        match self.channels.get(channel as usize) {
+            Some(channel) => channel.get_key_tune(key),
+            None => 0_f32,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -930,5 +966,85 @@ mod tests {
         synthesizer.note_on(0, 52, 100);
         synthesizer.note_on(0, 54, 100);
         assert_eq!(playing_keys(&mut synthesizer, 0), vec![52, 54]);
+    }
+
+    /// Selects a registered parameter and states its coarse value, as a file does.
+    fn send_rpn(synthesizer: &mut Synthesizer, channel: i32, parameter: (i32, i32), value: i32) {
+        synthesizer.process_midi_message(channel, 0xB0, 101, parameter.0);
+        synthesizer.process_midi_message(channel, 0xB0, 100, parameter.1);
+        synthesizer.process_midi_message(channel, 0xB0, 6, value);
+    }
+
+    /// The bend range a file asked for can be read back, which is the only way a
+    /// caller can tell an RPN that was acted on from one that was discarded.
+    #[test]
+    fn the_pitch_bend_range_a_file_set_reads_back() {
+        let mut synthesizer = test_synthesizer();
+        assert_eq!(synthesizer.get_channel_pitch_bend_range(8), 2_f32);
+
+        send_rpn(&mut synthesizer, 8, (0, 0), 12);
+
+        assert_eq!(synthesizer.get_channel_pitch_bend_range(8), 12_f32);
+        assert_eq!(
+            synthesizer.get_channel_pitch_bend_range(9),
+            2_f32,
+            "one channel only"
+        );
+    }
+
+    /// A data entry with no parameter selected changes nothing, and the accessor
+    /// is what says so.
+    #[test]
+    fn a_data_entry_with_no_parameter_selected_leaves_the_range_alone() {
+        let mut synthesizer = test_synthesizer();
+
+        synthesizer.process_midi_message(8, 0xB0, 6, 12);
+
+        assert_eq!(synthesizer.get_channel_pitch_bend_range(8), 2_f32);
+    }
+
+    /// RPN 1 and RPN 2 read back together, as the one tune the voice applies.
+    #[test]
+    fn the_channel_tune_reads_back_as_one_value() {
+        let mut synthesizer = test_synthesizer();
+        assert_eq!(synthesizer.get_channel_tune(0), 0_f32);
+
+        // Two semitones up, and a quarter tone under that.
+        send_rpn(&mut synthesizer, 0, (0, 2), 64 + 2);
+        send_rpn(&mut synthesizer, 0, (0, 1), 32);
+
+        assert!((synthesizer.get_channel_tune(0) - 1.5_f32).abs() < 0.01_f32);
+    }
+
+    /// The GS per-key drum tune reads back on the percussion channel and nowhere
+    /// else, matching where it is honored.
+    #[test]
+    fn the_drum_key_tune_reads_back_on_the_percussion_channel() {
+        let mut synthesizer = test_synthesizer();
+
+        for channel in [0, 9] {
+            synthesizer.process_midi_message(channel, 0xB0, 99, 0x18);
+            synthesizer.process_midi_message(channel, 0xB0, 98, 36);
+            synthesizer.process_midi_message(channel, 0xB0, 6, 64 - 9);
+        }
+
+        assert_eq!(synthesizer.get_channel_key_tune(9, 36), -9_f32);
+        assert_eq!(synthesizer.get_channel_key_tune(9, 38), 0_f32);
+        assert_eq!(
+            synthesizer.get_channel_key_tune(0, 36),
+            0_f32,
+            "a melodic channel tunes its keys through the font"
+        );
+    }
+
+    /// A channel outside the sixteen reads as the default rather than panicking.
+    #[test]
+    fn an_out_of_range_channel_reads_as_the_default() {
+        let synthesizer = test_synthesizer();
+
+        assert_eq!(synthesizer.get_channel_pitch_bend_range(-1), 2_f32);
+        assert_eq!(synthesizer.get_channel_pitch_bend_range(16), 2_f32);
+        assert_eq!(synthesizer.get_channel_tune(99), 0_f32);
+        assert_eq!(synthesizer.get_channel_key_tune(99, 36), 0_f32);
     }
 }

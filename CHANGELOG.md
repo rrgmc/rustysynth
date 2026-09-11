@@ -48,6 +48,14 @@ Portamento (CC5, CC65, CC84) and the GS NRPN vibrato parameters remain unimpleme
   255 into CC 6 under RPN 0 asked for a 255 semitone pitch bend range, and under RPN 1 detuned the
   channel by nearly three semitones for the rest of the file. `(value << 7)` also overflowed the
   packed selector for anything from 256 up, which `process_midi_message` passes through unchecked.
+- **Added `Synthesizer::get_channel_pitch_bend_range`, `get_channel_tune` and
+  `get_channel_key_tune`.** A host driving `process_midi_message` itself cannot tell from the
+  control changes it sent whether a registered parameter was acted on: a data entry arriving with no
+  parameter selected is discarded in silence, so the same six messages in a different order either
+  establish a bend range or establish nothing. The difference surfaces only as a part playing out of
+  tune, which is hard to notice and harder to test. These read the three tuning parameters back. A
+  channel outside the sixteen reads as the default, and the per-key drum tune reads as zero on a
+  melodic channel, matching where it is honored.
 - **The oscillator's loop wrap subtracts until the position is inside the loop**, rather than once
   per output sample. One subtraction only suffices while the pitch ratio is below the loop length;
   above it - a short loop played far above its root key - the position walked past the loop end and
