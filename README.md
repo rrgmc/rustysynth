@@ -43,7 +43,7 @@ exact commit, so a build is as reproducible as one against the registry:
 rustysynth = { git = "https://github.com/rrgmc/rustysynth", branch = "custom" }
 ```
 
-[`BRANCH_CHANGES.md`](BRANCH_CHANGES.md) is the short account against upstream and
+[`FORK_CHANGES.md`](FORK_CHANGES.md) is the short account against upstream and
 [`CHANGELOG.md`](CHANGELOG.md) the full one, with the measurements each change was made on.
 
 
