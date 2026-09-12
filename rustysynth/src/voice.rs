@@ -96,6 +96,13 @@ pub(crate) struct Voice {
     chorus_send_scale: f32,
 
     voice_state: VoiceState,
+    /// The channel's lift tally when this voice's note-off arrived.
+    ///
+    /// Meaningful only while `voice_state` is `ReleaseRequested`. A pedal that
+    /// goes down and up while the key is still held moves the channel's tally
+    /// and must not shorten the note, which is why this is latched at the
+    /// note-off and not at the note-on.
+    hold_pedal_lifts_at_end: u32,
     /// Time elapsed in samples
     voice_length: usize,
     min_voice_length: usize,
@@ -148,6 +155,7 @@ impl Voice {
             reverb_send_scale: settings.reverb_send_scale,
             chorus_send_scale: settings.chorus_send_scale,
             voice_state: VoiceState::Playing,
+            hold_pedal_lifts_at_end: 0,
             voice_length: 0,
             min_voice_length: (settings.sample_rate / 500) as usize,
         }
@@ -402,11 +410,16 @@ impl Voice {
 
         self.voice_state = VoiceState::Playing;
         self.voice_length = 0;
+        // A stolen or choked voice arrives carrying the previous note's latch.
+        // Nothing reads it before `end` overwrites it, and a stale count left in
+        // a live struct is how a later reader gets it wrong.
+        self.hold_pedal_lifts_at_end = channel_info.get_hold_pedal_lifts();
     }
 
-    pub(crate) fn end(&mut self) {
+    pub(crate) fn end(&mut self, channel_info: &Channel) {
         if self.voice_state == VoiceState::Playing {
             self.voice_state = VoiceState::ReleaseRequested;
+            self.hold_pedal_lifts_at_end = channel_info.get_hold_pedal_lifts();
         }
     }
 
@@ -572,7 +585,18 @@ impl Voice {
             return;
         }
 
-        if self.voice_state == VoiceState::ReleaseRequested && !channel_info.get_hold_pedal() {
+        if self.voice_state != VoiceState::ReleaseRequested {
+            return;
+        }
+
+        // Either the pedal is up now, or it has been lifted at least once since
+        // the note-off - a lift the pedal's own position cannot report, because
+        // the file put the lift and the press that followed it inside one block.
+        // The tally is compared rather than consumed, so a lift landing inside
+        // the voice's first two milliseconds releases it late rather than never:
+        // the inequality holds until the voice is recycled.
+        let lifted = channel_info.get_hold_pedal_lifts() != self.hold_pedal_lifts_at_end;
+        if !channel_info.get_hold_pedal() || lifted {
             self.vol_env.release();
             self.mod_env.release();
             self.oscillator.release();
@@ -608,11 +632,146 @@ impl Voice {
         self.voice_state == VoiceState::Playing
     }
 
+    /// True once the voice has been released and is running its release
+    /// envelope. `is_playing` beside it is false both for a voice awaiting a
+    /// pedal lift and for one already released, which is the distinction the
+    /// pedal path turns on.
+    pub(crate) fn is_released(&self) -> bool {
+        self.voice_state == VoiceState::Released
+    }
+
     pub(crate) fn priority(&self) -> f32 {
         if self.note_gain < SoundFontMath::NON_AUDIBLE {
             0_f32
         } else {
             self.vol_env.get_priority()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DOWN: i32 = 127;
+    const UP: i32 = 0;
+
+    /// A voice old enough for `release_if_necessary` to act on it. `start` is
+    /// the only other way past the click gate and it needs a font, so the gate
+    /// is stepped over directly here.
+    fn aged_voice(settings: &SynthesizerSettings) -> Voice {
+        let mut voice = Voice::new(settings);
+        voice.voice_length = voice.min_voice_length;
+        voice
+    }
+
+    /// A sequencer writes a re-pedal as a pedal-up and a pedal-down on one tick,
+    /// and a host that drains every event due before it renders hands both to
+    /// the synthesizer inside one block. The pedal is down at each end of that
+    /// block, so a voice reading the pedal's position never sees the lift and
+    /// holds at full sustain for the rest of the song - on a strings part, until
+    /// it masks everything else in the file.
+    #[test]
+    fn a_pedal_lift_cancelled_inside_one_block_still_releases_the_voice() {
+        let settings = SynthesizerSettings::new(44100);
+        let mut channel = Channel::new(false);
+        let mut voice = aged_voice(&settings);
+
+        channel.set_hold_pedal(DOWN);
+        voice.end(&channel);
+        voice.release_if_necessary(&channel);
+        assert!(!voice.is_released(), "the pedal holds it");
+
+        channel.set_hold_pedal(UP);
+        channel.set_hold_pedal(DOWN);
+        voice.release_if_necessary(&channel);
+
+        assert!(voice.is_released());
+    }
+
+    /// The control, and the property the lift tally must not cost: a pedal that
+    /// stays down goes on holding the voice, and the lift is what releases it.
+    #[test]
+    fn a_pedal_still_down_goes_on_holding_the_voice() {
+        let settings = SynthesizerSettings::new(44100);
+        let mut channel = Channel::new(false);
+        let mut voice = aged_voice(&settings);
+
+        channel.set_hold_pedal(DOWN);
+        voice.end(&channel);
+        for _ in 0..32 {
+            voice.release_if_necessary(&channel);
+        }
+        assert!(!voice.is_released());
+
+        channel.set_hold_pedal(UP);
+        voice.release_if_necessary(&channel);
+        assert!(voice.is_released());
+    }
+
+    /// The pedal moving while the key is *held* must not shorten the note that
+    /// follows, which is what makes the note-off the moment to record the tally.
+    /// Recording it at the note-on leaves the count already moved, so the next
+    /// note-off releases under a pedal that is down.
+    #[test]
+    fn a_pedal_cycled_while_the_key_is_held_does_not_shorten_the_note() {
+        let settings = SynthesizerSettings::new(44100);
+        let mut channel = Channel::new(false);
+        let mut voice = aged_voice(&settings);
+
+        channel.set_hold_pedal(DOWN);
+        voice.release_if_necessary(&channel);
+
+        channel.set_hold_pedal(UP);
+        channel.set_hold_pedal(DOWN);
+        voice.release_if_necessary(&channel);
+
+        voice.end(&channel);
+        voice.release_if_necessary(&channel);
+        assert!(!voice.is_released(), "the pedal is down");
+    }
+
+    /// A lift inside the voice's first two milliseconds releases it late rather
+    /// than never. The click gate defers the decision by design; the decision
+    /// itself has to survive being deferred, which a tally compared against a
+    /// latched count does and a level read once does not.
+    #[test]
+    fn a_lift_under_the_click_gate_releases_the_voice_late() {
+        let settings = SynthesizerSettings::new(44100);
+        let mut channel = Channel::new(false);
+        let mut voice = Voice::new(&settings);
+
+        channel.set_hold_pedal(DOWN);
+        voice.end(&channel);
+        channel.set_hold_pedal(UP);
+        channel.set_hold_pedal(DOWN);
+
+        voice.release_if_necessary(&channel);
+        assert!(!voice.is_released(), "younger than the click gate");
+
+        voice.voice_length = voice.min_voice_length;
+        voice.release_if_necessary(&channel);
+        assert!(voice.is_released());
+    }
+
+    /// Reset All Controllers lifts a pedal that was down, so a file that sends
+    /// CC121 and re-presses on one tick is the same defect wearing a different
+    /// hat. One writer on the channel is what catches both.
+    #[test]
+    fn reset_all_controllers_lifts_the_pedal_even_inside_one_block() {
+        let settings = SynthesizerSettings::new(44100);
+        let mut channel = Channel::new(false);
+        let mut voice = aged_voice(&settings);
+
+        channel.set_hold_pedal(DOWN);
+        voice.end(&channel);
+        voice.release_if_necessary(&channel);
+        assert!(!voice.is_released());
+
+        channel.reset_all_controllers();
+        channel.set_hold_pedal(DOWN);
+        voice.release_if_necessary(&channel);
+
+        assert!(voice.is_released());
     }
 }
