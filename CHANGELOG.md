@@ -37,6 +37,11 @@ is the obvious alternative. It bypasses `min_voice_length` outright, so a voice 
 milliseconds old gets the click that gate exists to prevent; skipping those voices leaves them
 stranded exactly as before, because the next block's level read still finds the pedal down.
 
+**150 files sampled from a 616,602 file corpus, rendered through TimGM6mb: one differs.** It presses
+the pedal again on the same tick as it lifts 81 times out of 83, which is the shape this changes and
+the only shape it changes. The other 147 that rendered are hash-identical, and two fail to parse on
+both builds.
+
 **MIDI channel mode messages are honored.** CC126 (Mono Mode On) puts a channel monophonic and CC127
 (Poly Mode On) returns it to polyphonic; CC124-127 all act as All Notes Off, as the spec requires of
 every mode message. They were previously ignored outright.
