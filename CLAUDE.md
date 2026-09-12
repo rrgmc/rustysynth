@@ -155,6 +155,14 @@ Exactly 16 `Channel`s, index 9 forced to percussion (bank 128). Worth knowing: `
 `reverb_send` at **40, not 0** (`channel.rs:63`), and `reset_all_controllers()` deliberately
 preserves volume, pan, and sends.
 
+**`hold_pedal` has exactly one writer, and the lift tally is monotonic.** `write_hold_pedal` is it,
+so `reset` and `reset_all_controllers` count their lift along with `set_hold_pedal`. A voice whose
+note-off lands under the pedal latches `hold_pedal_lifts` and releases when it differs, because
+`Voice::release_if_necessary` runs once per block and a file that writes a pedal-up and a
+pedal-down on one tick leaves the pedal down at both ends of that block. Zeroing the tally would let
+a latched count compare equal again, which is a voice that never releases; anything that resets a
+channel without also clearing the voice pool depends on that.
+
 **One NRPN is honored, the rest are accepted and dropped.** GS 18H, drum instrument pitch coarse,
 lands in `Channel::key_tune` as a per-key semitone offset and is read at `voice.rs`'s
 `channel_pitch_change`; `get_key_tune` gates on `bank_number >= 128`, because the same key numbers

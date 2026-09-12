@@ -1,5 +1,42 @@
 # v1.5.0
 
+**A pedal lift is an event, not a level.** A hold pedal defers every note-off on its channel, and
+the decision to release a deferred voice is taken once per render block - 1.45 ms at 44.1 kHz and
+the default block size. A host that drains every event due before it renders therefore hands a
+pedal-up and the pedal-down that follows it on the same tick to the synthesizer inside one block:
+the pedal is down at both ends of that block, the lift between them is unobservable as a position,
+and every voice its note-offs asked to release stays at full sustain for the rest of the file.
+
+Sequencers write a re-pedal exactly that way, so this is not a corner case in the files that meet
+it. Of 386 parsed `.kar` files from one corpus folder, 167 touch CC64 and 13 of those cancel at
+least one lift inside the block - and where it happens it is pervasive rather than occasional. In
+the 28-track file the defect was reported on, 59 of 67 lifts on a String Ensemble 2 part are
+cancelled on their own tick and 86 of 96 on the piano beside it; the strings go from 5 sounding
+voices to 39 and the piano from 6 to 165. Strings hold their sustain level indefinitely, so that
+part climbs until it masks the arrangement, and a saturated voice pool then steals voices from
+channels that never touched the pedal.
+
+`Channel` tallies lifts, `Voice::end` latches the tally its note-off arrived at, and
+`release_if_necessary` releases when the tally has moved, whatever the pedal's position is by then.
+Three properties of that shape are deliberate:
+
+- **The tally is compared, not consumed.** A lift landing inside `min_voice_length` - the two
+  milliseconds that stop a voice being cut off with a click - releases the voice late rather than
+  never, because the latched count goes on differing until the voice is recycled. The click gate
+  defers the decision and does not lose it.
+- **The latch is taken at the note-off, not the note-on.** A pedal cycled while the key is still
+  held moves the channel's tally, so a count taken at note-on would already differ and would release
+  the next note-off under a pedal that is down, shortening an ordinary note.
+- **`write_hold_pedal` is the only writer of `hold_pedal`**, so Reset All Controllers and a full
+  reset count their lift too - a file that sends CC121 and re-presses on one tick is the same defect
+  wearing a different hat. The tally is never zeroed: a count a voice has latched that compares equal
+  again is a voice that never releases.
+
+Releasing eligible voices inside `process_midi_message` instead is what a hardware receiver does and
+is the obvious alternative. It bypasses `min_voice_length` outright, so a voice under two
+milliseconds old gets the click that gate exists to prevent; skipping those voices leaves them
+stranded exactly as before, because the next block's level read still finds the pedal down.
+
 **MIDI channel mode messages are honored.** CC126 (Mono Mode On) puts a channel monophonic and CC127
 (Poly Mode On) returns it to polyphonic; CC124-127 all act as All Notes Off, as the spec requires of
 every mode message. They were previously ignored outright.
@@ -27,7 +64,8 @@ orthogonal bits of the MIDI mode, so a file sending the conventional CC124 + CC1
 would otherwise be forced back to poly. Mono mode survives Reset All Controllers, which resets
 controllers and not channel modes, and is cleared by a full reset. The sustain pedal still wins:
 a mono channel holding CC64 goes on stacking notes, since `Voice::release_if_necessary` will not
-release while the pedal is down.
+release while the pedal is held down - a lift it cannot see as a position is the one case that
+releases them, above.
 
 Portamento (CC5, CC65, CC84) and the GS NRPN vibrato parameters remain unimplemented.
 
