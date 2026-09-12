@@ -175,8 +175,21 @@ pub fn stems(sound_font_path: &Path, midi_path: &Path, out_dir: &Path) -> Result
 }
 
 fn new_synthesizer(sound_font: &Arc<SoundFont>) -> Result<Synthesizer, String> {
+    new_synthesizer_with_polyphony(sound_font, None)
+}
+
+/// The same, with the voice pool sized by the caller. What a file demands is
+/// only readable off a pool it does not saturate, and the crate default of 64
+/// saturates on most of a karaoke arrangement.
+fn new_synthesizer_with_polyphony(
+    sound_font: &Arc<SoundFont>,
+    polyphony: Option<usize>,
+) -> Result<Synthesizer, String> {
     let mut settings = SynthesizerSettings::new(SAMPLE_RATE);
     settings.block_size = BLOCK;
+    if let Some(polyphony) = polyphony {
+        settings.maximum_polyphony = polyphony;
+    }
     Synthesizer::new(sound_font, &settings).map_err(|e| e.to_string())
 }
 
@@ -490,7 +503,11 @@ pub fn notes(sound_font_path: &Path, midi_path: &Path, output: &Path) -> Result<
 // voices
 // -------------------------------------------------------------------------
 
-pub fn voices(sound_font_path: &Path, midi_path: &Path) -> Result<(), String> {
+pub fn voices(
+    sound_font_path: &Path,
+    midi_path: &Path,
+    polyphony: Option<usize>,
+) -> Result<(), String> {
     let sound_font = open_sound_font(sound_font_path)?;
     let midi_file = open_midi(midi_path)?;
 
@@ -498,7 +515,7 @@ pub fn voices(sound_font_path: &Path, midi_path: &Path) -> Result<(), String> {
     let samples = block_count(&midi_file) * BLOCK;
     let mut left = vec![0_f32; samples];
     let mut right = vec![0_f32; samples];
-    let mut synthesizer = new_synthesizer(&sound_font)?;
+    let mut synthesizer = new_synthesizer_with_polyphony(&sound_font, polyphony)?;
 
     let polyphony = synthesizer.get_maximum_polyphony();
 

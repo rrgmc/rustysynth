@@ -39,7 +39,7 @@ fn usage() -> ExitCode {
   probe <sf2> <patch>                   velocity response and send scale of one patch
   diagnose stems <sf2> <mid> <outdir>   render each channel on its own, as WAV
   diagnose notes <sf2> <mid> <out.tsv>  what every note-on resolved to, and the tuning the font asks for
-  diagnose voices <sf2> <mid>           how much polyphony the file actually wants"
+  diagnose voices <sf2> <mid> [pool]    how much polyphony the file actually wants"
     );
     ExitCode::from(2)
 }
@@ -73,8 +73,13 @@ fn main() -> ExitCode {
             Path::new(&args[4]),
         ),
         ("diagnose", 4) if args[1] == "voices" => {
-            diagnose::voices(Path::new(&args[2]), Path::new(&args[3]))
+            diagnose::voices(Path::new(&args[2]), Path::new(&args[3]), None)
         }
+        ("diagnose", 5) if args[1] == "voices" => diagnose::voices(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            args[4].parse().ok(),
+        ),
         _ => return usage(),
     };
 
