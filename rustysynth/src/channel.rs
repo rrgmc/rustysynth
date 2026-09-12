@@ -21,6 +21,17 @@ pub(crate) struct Channel {
     expression: i16,
     hold_pedal: bool,
 
+    /// How many times the hold pedal has gone from down to up on this channel.
+    ///
+    /// A voice whose note-off arrives under the pedal records this count and
+    /// releases as soon as it differs, rather than waiting to observe the pedal
+    /// itself up. `Voice::release_if_necessary` runs once per render block -
+    /// 1.45 ms at 44.1 kHz and the default block size - and a sequencer writes a
+    /// re-pedal as a pedal-up and a pedal-down on one tick, so the pedal is down
+    /// at both ends of that block and the lift between them is invisible as a
+    /// level. The count is what makes the lift an event.
+    hold_pedal_lifts: u32,
+
     /// MIDI mono mode (CC126) rather than poly mode (CC127) - modes 4 and 3.
     ///
     /// The data byte of CC126 is "M", the number of channels the mono span
@@ -92,6 +103,7 @@ impl Channel {
             pan: 0,
             expression: 0,
             hold_pedal: false,
+            hold_pedal_lifts: 0,
             mono_mode: false,
             mono_stack: [(0, 0); Channel::MONO_STACK_LEN],
             mono_stack_len: 0,
@@ -121,7 +133,7 @@ impl Channel {
         self.volume = 100 << 7;
         self.pan = 64 << 7;
         self.expression = 127 << 7;
-        self.hold_pedal = false;
+        self.write_hold_pedal(false);
         self.mono_mode = false;
         self.mono_stack_len = 0;
 
@@ -152,7 +164,7 @@ impl Channel {
     pub(crate) fn reset_all_controllers(&mut self) {
         self.modulation = 0;
         self.expression = 127 << 7;
-        self.hold_pedal = false;
+        self.write_hold_pedal(false);
 
         self.rpn = -1;
         self.nrpn = -1;
@@ -228,8 +240,25 @@ impl Channel {
         self.expression = (((self.expression as i32) & 0xFF80) | (value & 0x7F)) as i16;
     }
 
+    /// Moves the pedal, tallying a lift as it goes.
+    ///
+    /// The only writer of `hold_pedal`, so nothing can change the pedal's
+    /// position without the lift being counted - Reset All Controllers and a
+    /// full reset included, both of which lift a pedal that was down.
+    ///
+    /// `wrapping_add` because this runs on the audio thread under debug
+    /// assertions. A wrapped count is harmless: it is only ever compared for
+    /// inequality against a count a voice took moments earlier.
+    fn write_hold_pedal(&mut self, down: bool) {
+        if self.hold_pedal && !down {
+            self.hold_pedal_lifts = self.hold_pedal_lifts.wrapping_add(1);
+        }
+
+        self.hold_pedal = down;
+    }
+
     pub(crate) fn set_hold_pedal(&mut self, value: i32) {
-        self.hold_pedal = value >= 64;
+        self.write_hold_pedal(value >= 64);
     }
 
     /// Selects mono mode (CC126) or poly mode (CC127).
@@ -421,6 +450,14 @@ impl Channel {
         self.hold_pedal
     }
 
+    /// The lift tally described on `hold_pedal_lifts`. Monotonic for the life of
+    /// the channel: a reset moves the pedal and deliberately does not zero the
+    /// count, because a count a voice has latched that compares equal again is a
+    /// voice that never releases.
+    pub(crate) fn get_hold_pedal_lifts(&self) -> u32 {
+        self.hold_pedal_lifts
+    }
+
     pub(crate) fn get_mono_mode(&self) -> bool {
         self.mono_mode
     }
@@ -587,6 +624,7 @@ mod tests {
         channel.set_pitch_bend(0x7F, 0x7F);
         assert!((channel.get_pitch_bend_normalized() - 1_f32).abs() < 1.0e-3);
     }
+
     /// CC126 and CC127 select a channel *mode*, not a controller value. A
     /// reset returns the channel to poly, which is the GM power-up default,
     /// but Reset All Controllers deliberately does not - a file that declares
@@ -611,6 +649,37 @@ mod tests {
 
         channel.reset();
         assert!(!channel.get_mono_mode());
+    }
+
+    /// The tally counts a lift however the pedal goes up, because a file that
+    /// resets the controllers and re-presses on one tick is the same defect as
+    /// one that lifts and re-presses. It is what a voice compares against to
+    /// release on a lift it could not observe as a position.
+    #[test]
+    fn every_way_the_pedal_goes_up_is_counted_once() {
+        let mut channel = Channel::new(false);
+        assert_eq!(channel.get_hold_pedal_lifts(), 0);
+
+        channel.set_hold_pedal(127);
+        channel.set_hold_pedal(127);
+        assert_eq!(channel.get_hold_pedal_lifts(), 0, "no transition, no lift");
+
+        channel.set_hold_pedal(0);
+        assert_eq!(channel.get_hold_pedal_lifts(), 1);
+        channel.set_hold_pedal(0);
+        assert_eq!(channel.get_hold_pedal_lifts(), 1);
+
+        channel.set_hold_pedal(127);
+        channel.reset_all_controllers();
+        assert_eq!(channel.get_hold_pedal_lifts(), 2);
+
+        channel.set_hold_pedal(127);
+        channel.reset();
+        assert_eq!(
+            channel.get_hold_pedal_lifts(),
+            3,
+            "and a reset does not zero it"
+        );
     }
 
     /// A malformed MIDI file can deliver a data byte with the high bit set.

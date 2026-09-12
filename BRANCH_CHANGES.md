@@ -1,11 +1,11 @@
 # Changes on `custom`
 
-What this fork changes relative to upstream `main` (41 commits, 52 files): SF2 modulator support,
-lenient SoundFont loading, two fixes to the pitch path, the MIDI channel mode messages, a round of
-hardening and three MIDI parsing fixes. `feat/lenient-soundfont-loading`, where most of it was
-written, has been merged into `custom` and deleted. The crate goes from 1.3.6 to 1.5.0 and keeps its
-zero dependencies. `CHANGELOG.md` carries the full account with the measurements; this is the short
-version.
+What this fork changes relative to upstream `main` (44 commits, 52 files): SF2 modulator support,
+lenient SoundFont loading, two fixes to the pitch path, the MIDI channel mode messages, the hold
+pedal, a round of hardening and three MIDI parsing fixes. `feat/lenient-soundfont-loading`, where
+most of it was written, has been merged into `custom` and deleted. The crate goes from 1.3.6 to
+1.5.0 and keeps its zero dependencies. `CHANGELOG.md` carries the full account with the
+measurements; this is the short version.
 
 ## SF2 modulators
 
@@ -105,9 +105,26 @@ version.
   forced back to poly. Mono mode survives Reset All Controllers, which resets controllers and not
   channel modes, and is cleared by a full reset. The sustain pedal still wins: a mono channel
   holding CC64 goes on stacking notes, since `Voice::release_if_necessary` will not release while
-  the pedal is down. The previous note is released rather than killed, so a release tail of the
+  the pedal is held down. The previous note is released rather than killed, so a release tail of the
   older pitch remains; hardware reassigns one voice and has no overlap at all, which would mean
   changing a sounding voice's key.
+
+## The hold pedal
+
+- A pedal lift is counted on the channel rather than read as a position, so a lift the render block
+  hides still releases the voices the pedal was holding. The decision to release a deferred voice is
+  taken once per block, and a host that drains every event due before it renders hands a pedal-up
+  and the pedal-down that follows it on one tick to the synthesizer inside a single block, with the
+  pedal down at both ends of it. Sequencers write a re-pedal that way: in the 28-track karaoke file
+  this was found on, 59 of 67 lifts on a String Ensemble 2 part are cancelled on their own tick, and
+  the part goes from 5 sounding voices to 39 and climbs until it masks the arrangement.
+- `Voice::end` latches the tally its note-off arrived at and `release_if_necessary` compares rather
+  than consumes it, so a lift landing inside `min_voice_length` releases the voice late rather than
+  never. Latching at the note-off and not the note-on is what keeps a pedal cycled under a held key
+  from shortening the note that follows.
+- `write_hold_pedal` is the only writer of `hold_pedal`, so Reset All Controllers and a full reset
+  count their lift too. The tally is never zeroed: a count a voice has latched that compares equal
+  again is a voice that never releases.
 
 ## New public API
 

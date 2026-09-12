@@ -205,9 +205,10 @@ impl Synthesizer {
             return;
         }
 
+        let channel_info = &self.channels[channel as usize];
         for voice in self.voices.get_active_voices().iter_mut() {
             if voice.channel() == channel && voice.key() == key {
-                voice.end();
+                voice.end(channel_info);
             }
         }
 
@@ -274,7 +275,7 @@ impl Synthesizer {
         if channel_info.get_mono_mode() {
             for voice in self.voices.get_active_voices().iter_mut() {
                 if voice.channel() == channel {
-                    voice.end();
+                    voice.end(channel_info);
                 }
             }
 
@@ -337,8 +338,9 @@ impl Synthesizer {
         if immediate {
             self.voices.clear();
         } else {
+            let channels = &self.channels;
             for voice in self.voices.get_active_voices().iter_mut() {
-                voice.end();
+                voice.end(&channels[voice.channel() as usize]);
             }
         }
     }
@@ -363,9 +365,15 @@ impl Synthesizer {
                 }
             }
         } else {
+            // `channels.get` rather than an index: this is public and, unlike
+            // `note_off`, does not bounds-check its channel - the mono clear
+            // above reaches for it the same way.
+            let Some(channel_info) = self.channels.get(channel as usize) else {
+                return;
+            };
             for voice in self.voices.get_active_voices().iter_mut() {
                 if voice.channel() == channel {
-                    voice.end();
+                    voice.end(channel_info);
                 }
             }
         }
